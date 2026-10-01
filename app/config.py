@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -34,12 +35,12 @@ def parse_allowlist(raw: str) -> list[AllowedUser]:
 
 
 class Env(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+    model_config = SettingsConfigDict(env_file=".env", extra="ignore", env_ignore_empty=True)
 
     telegram_bot_token: str
     anthropic_api_key: str = ""  # empty -> fallback mode (§7.0)
     allowed_telegram_ids: str
-    group_chat_id: int | None = None
+    group_chat_id: int | None = None  # see design §10: seeds the one allowed group
     data_dir: Path = Path("/data")
     log_level: str = "INFO"
     tz: str = "UTC"
@@ -48,6 +49,15 @@ class Env(BaseSettings):
     @classmethod
     def _validate_allowlist(cls, v: str) -> str:
         parse_allowlist(v)
+        return v
+
+    @field_validator("tz")
+    @classmethod
+    def _validate_tz(cls, v: str) -> str:
+        try:
+            ZoneInfo(v)
+        except ZoneInfoNotFoundError as e:  # a KeyError, so pydantic wouldn't wrap it
+            raise ValueError(f"unknown timezone {v!r}") from e
         return v
 
     @property

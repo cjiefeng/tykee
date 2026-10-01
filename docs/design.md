@@ -334,7 +334,7 @@ CREATE TABLE import_windows (                    -- unit of work; makes extracti
   job_id        INTEGER NOT NULL REFERENCES import_jobs(id),
   chat_ref      TEXT NOT NULL,                   -- which exported chat
   start_ts      TEXT NOT NULL, end_ts TEXT NOT NULL,
-  text          TEXT NOT NULL,                   -- normalised transcript (deleted when job done)
+  text          TEXT,                            -- normalised transcript (nulled out at APPLY)
   status        TEXT NOT NULL DEFAULT 'pending', -- 'pending'|'submitted'|'done'|'failed'
   batch_id      TEXT,                            -- Anthropic Message Batches id
   result_json   TEXT                             -- extracted items
