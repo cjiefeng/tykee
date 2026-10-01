@@ -5,9 +5,10 @@ description = "Private Telegram decision bot for two, powered by the Claude API"
 requires-python = ">=3.12,<3.13"
 dependencies = [
   "aiogram>=3.13,<4",
-  "anthropic>=0.40",
+  "anthropic>=1.11,<2",
   "pydantic>=2.7",
   "pydantic-settings>=2.4",
+  "sqlite-vec>=0.1.6",
   "tzdata",
 ]
 
@@ -39,8 +40,13 @@ strict = true
 files = ["app"]
 plugins = ["pydantic.mypy"]
 
+[[tool.mypy.overrides]]
+module = ["sqlite_vec"]
+ignore_missing_imports = true
+
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+pythonpath = ["."]
 markers = ["integration: hits real external APIs; opt-in via `-m integration`"]
 addopts = "-m 'not integration'"

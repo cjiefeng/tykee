@@ -1,0 +1,14 @@
+# Exactly one replica: a second poller gets 409 Conflict from Telegram (§10).
+services:
+  tykee:
+    build: .
+    image: tykee:latest
+    container_name: tykee
+    restart: unless-stopped
+    env_file: .env
+    ports:
+      - "8080:8080"                          # dashboard (M4), LAN only
+    volumes:
+      - ${TYKEE_DATA_DIR:-./data}:/data      # on the NAS: /volume_nvme/tykee/data
+    mem_limit: 1g
+    # healthcheck (python -m app.healthcheck) arrives in M6
