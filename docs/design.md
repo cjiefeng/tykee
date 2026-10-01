@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **Status** | Draft v1.7 (import defaults to Opus-tier) |
+| **Status** | Draft v1.8 (M1 plan review amendments) |
 | **Name** | Tykee: phonetic spelling of Tyche, the Greek goddess of chance. Telegram handle e.g. `@TykeeBot` (must end in "bot") |
 | **Author** | Jack |
 | **Date** | 2026-10-01 |
@@ -132,6 +132,8 @@ PRAGMA foreign_keys = ON;
 PRAGMA busy_timeout = 5000;
 ```
 
+**Time:** all timestamps are stored as UTC ISO-8601 text. Every "day" boundary (daily budget, `unprompted_today`, "today's decisions", nudges) uses the single household timezone from the `TZ` env var. `users.timezone` is only used to render "now" in the prompt.
+
 Concurrency model: one dedicated **writer connection** owned by a single thread (all writes queued through it); a small pool of **read-only connections** for the dashboard and retrieval. CPU-bound work (embedding) runs in a `ThreadPoolExecutor` so the event loop is never blocked.
 
 ### 5.2 Schema
@@ -205,6 +207,7 @@ CREATE TABLE decisions (
   status       TEXT NOT NULL,                  -- 'suggested'|'accepted'|'rerolled'|'rejected'
   source       TEXT NOT NULL DEFAULT 'live',   -- 'live' | 'import'
   chat_id      INTEGER,                        -- DM or group it happened in
+  tg_message_id INTEGER,                       -- bot message carrying the ✅🎲❌ keyboard
   created_at   TEXT NOT NULL DEFAULT (datetime('now'))   -- for imports: original message time
 );
 CREATE INDEX ix_decisions_cat_time ON decisions(category_id, created_at);
@@ -213,12 +216,15 @@ CREATE INDEX ix_decisions_cat_time ON decisions(category_id, created_at);
 CREATE TABLE messages (
   id          INTEGER PRIMARY KEY,
   chat_id     INTEGER NOT NULL,
+  tg_message_id INTEGER,                        -- Telegram message id (NULL for tool rows)
   user_id     INTEGER REFERENCES users(id),     -- NULL for assistant
-  role        TEXT NOT NULL,                    -- 'user' | 'assistant' | 'tool'
+  role        TEXT NOT NULL,                    -- 'user' | 'assistant' | 'tool' (internal; see §7.2)
+  kind        TEXT NOT NULL DEFAULT 'text',     -- 'text'|'sticker'|'photo'|'emoji'|'voice'|'other'
   content     TEXT NOT NULL,                    -- JSON blocks
   created_at  TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX ix_messages_chat_time ON messages(chat_id, created_at);
+CREATE UNIQUE INDEX ux_messages_tg ON messages(chat_id, tg_message_id) WHERE tg_message_id IS NOT NULL;
 
 CREATE TABLE chat_summaries (                   -- rolling summary of older turns
   chat_id     INTEGER PRIMARY KEY,
@@ -277,6 +283,9 @@ CREATE TABLE memory_inbox (
 CREATE TABLE usage (
   id                 INTEGER PRIMARY KEY,
   user_id            INTEGER REFERENCES users(id),
+  purpose            TEXT NOT NULL,               -- 'chat'|'judge'|'summary'|'import_extract'|'import_consolidate'
+  chat_id            INTEGER,
+  import_job_id      INTEGER REFERENCES import_jobs(id),
   model              TEXT NOT NULL,
   input_tokens       INTEGER NOT NULL,
   output_tokens      INTEGER NOT NULL,
@@ -368,7 +377,7 @@ The vault is bot-owned. Humans view/edit it only through the dashboard, so every
 │   ├── jack/<slug>.md     # facts learned about Jack
 │   └── partner/<slug>.md
 └── logs/
-    └── 2026/10/2026-10-01.md   # human-readable mirror of decisions (DB is authoritative)
+    └── 2026/10/2026-10-01.md   # human-readable mirror of decisions (DB is authoritative; NOT indexed)
 ```
 
 ### 6.2 Note format
@@ -396,6 +405,8 @@ Jack likes spicy food but not numbing (mala) spice. See [[shared/topics/sichuan]
 3. Parse → chunk → diff `chunk_hash` against DB → embed only new/changed chunks (thread pool).
 4. In one SQLite transaction: upsert `notes`, replace `chunks`/`chunks_fts`/`chunks_vec`/`links` for that note.
 5. Mark the vault dirty for the nightly git commit.
+
+`logs/` is written through `NoteStore` but excluded from the index (steps 3–4 skipped), so decision logs never crowd out real memories in retrieval.
 
 **Startup reconcile:** walk the vault, compare `file_hash`; reindex changed files, delete index rows for missing files. **Model change:** if `embed_model` ≠ configured model, full reindex (a few thousand chunks ≈ about a minute on this CPU).
 
@@ -464,7 +475,7 @@ Pinned notes can only be modified via the dashboard or an explicit user request,
 
 Client rules:
 - A single `LLMClient` wrapper around the official `anthropic` SDK (`AsyncAnthropic`) is the only code allowed to call the API. It applies model selection from `settings`, budget checks before the call, `usage` recording after it, timeouts (30 s interactive, 120 s consolidation), and retries with exponential backoff on 429/5xx/overloaded (max 2 for interactive paths).
-- Model IDs are never hardcoded; they come from `settings` (`models.default`, `models.escalated`, `models.judge`, `models.import_extract`, `models.import_consolidate`), seeded from current Anthropic docs at first run (import keys default to the current Opus model).
+- Model IDs are never hardcoded in code paths; they come from `settings` (`models.default`, `models.escalated`, `models.judge`, `models.import_extract`, `models.import_consolidate`). The only place model IDs appear is the settings seed data, written from current Anthropic docs at development time and inserted on first run for missing keys (import keys default to the current Opus model).
 - The price table used for cost tracking lives in `settings` (`pricing.<model>`), editable in the dashboard.
 - If `ANTHROPIC_API_KEY` is missing or invalid at startup, the bot still starts in fallback mode (§8.5) and the dashboard shows a red health tile.
 
@@ -492,6 +503,10 @@ messages:
 ```
 
 Prompt caching on [1]–[3] keeps per-message cost low because they're identical across turns.
+
+**History replay:** tool calls and results are persisted (`role='tool'`, for the dashboard's conversation view) but **not replayed**. Only user text and the assistant's final text go into [5]: cheaper, and no risk of orphaned `tool_use`/`tool_result` pairs. The API has no `tool` role; it's an internal label. In groups, consecutive messages from users are collapsed into one user turn with speaker prefixes (`[jack] …\n[partner] …`).
+
+**Rolling summary:** when unsummarised turns exceed N, the oldest overflow is summarised (Haiku-tier, `purpose='summary'`) into `chat_summaries`. Implemented in M2b; M1 replays the last N turns only.
 
 ### 7.3 Tools exposed to Claude
 
@@ -531,7 +546,8 @@ resolve_category(phrase, proposed_slug, description, proposed_tau_days):
   2. exact slug:  proposed_slug in categories (follow merged_into)           → return it, add alias
   3. semantic:    cos(embed(proposed_slug + ': ' + description), each category.embedding)
                   best ≥ 0.85                                                → return it, add alias
-                  0.70 ≤ best < 0.85 → return best but flag 'uncertain' (Claude may override once)
+                  0.70 ≤ best < 0.85 → return {status:'uncertain', match, score}; Claude may call
+                                       again with create_new=true (at most once per turn) → step 4
   4. create:      new category(slug, description, tau = clamp(proposed_tau_days, 0.5, 365),
                   created_by='bot'), add alias, notify admin in dashboard feed
 ```
@@ -545,8 +561,10 @@ resolve_category(phrase, proposed_slug, description, proposed_tau_days):
 ### 8.2 Candidate set
 
 1. Active `options` for the category, owner ∈ scope.
-2. Filter by `include_tags` / `exclude_tags` and hard constraints (tags such as `contains:peanut` vs. user's allergy list).
-3. Optionally union `extra_candidates` proposed by Claude (if `allow_generated`), each with weight 1.0.
+2. Filter by `include_tags` / `exclude_tags` and hard constraints: option tags vs. the union of `avoid_tags` for every user in `for_users`. `avoid_tags` is a structured frontmatter list on `people/<slug>.md` (e.g. `avoid_tags: [contains:peanut, contains:coriander]`), parsed by code, so allergy filtering never depends on the LLM.
+3. Optionally union `extra_candidates` proposed by Claude (if `allow_generated`), each with weight 1.0. The tool schema **requires** `tags` on each candidate so the same constraint filter applies to them.
+
+Until M3 delivers `people/*.md`, only the `exclude_tags` Claude passes are enforced (known gap during M2).
 
 ### 8.3 Weighting
 
@@ -562,7 +580,9 @@ recency_i  = 1 − exp(−Δt_i / τ)        Δt_i = days since last 'accepted' 
 
 Examples with τ = 3: picked yesterday → 0.28; 3 days ago → 0.63; a week ago → 0.90.
 
-Sampling: `random.SystemRandom().choices(candidates, weights, k=1)`, repeated without replacement for `n > 1`. Options rejected in the *current* conversation get weight 0.
+Sampling: `random.SystemRandom().choices(candidates, weights, k=1)`, repeated without replacement for `n > 1`. Options rerolled or rejected in the *current* conversation get weight 0, where "current conversation" = same `chat_id` and category within the last `decisions.session_hours` (default 6).
+
+Recency for generated candidates (`option_id` NULL) matches past decisions on casefolded `choice_text`.
 
 ### 8.4 Learning from feedback
 
@@ -571,6 +591,8 @@ Sampling: `random.SystemRandom().choices(candidates, weights, k=1)`, repeated wi
 | ✅ accepted | `decisions.status='accepted'`; `pref × 1.05` (clamped ≤ 3.0); log mirrored to `logs/` |
 | 🎲 reroll | `status='rerolled'`; no pref change; re-run pick excluding it |
 | ❌ not this | `status='rejected'`; `pref × 0.85` (clamped ≥ 0.1) |
+
+Preference updates apply only to the user who tapped, even when `for_users='both'`. Callbacks are allowlist-checked like messages.
 
 ### 8.5 Fallback
 
@@ -600,7 +622,7 @@ User taps ✅ → callback → status='accepted', pref update, log note appended
 
 ## 10. Telegram specifics
 
-- **Allowlist:** `ALLOWED_TELEGRAM_IDS` env seeds `users`; any other `from.id` is dropped before any processing or API call.
+- **Allowlist:** `ALLOWED_TELEGRAM_IDS` env (`<id>:<slug>,<id>:<slug>`, first entry is the admin) seeds `users`; any other `from.id` is dropped before any processing or API call. This applies to messages, edits, callbacks and reactions.
 - **Chats:** the shared group is primary; DMs are secondary.
 
   | | Shared group (primary) | Private DM (secondary) |
@@ -610,10 +632,10 @@ User taps ✅ → callback → status='accepted', pref update, log note appended
   | Default `for_users` | `both`, unless message says "just me/for me" | The sender, unless message says "we/us/both/together" |
   | History | Per `chat_id` (DM context never shown in the group) | Per `chat_id` |
   | Memory | Shared second brain across chats; owner filters apply as usual | Same |
-  | Allowed group | Only the one group whose `chat.id` is in settings; the bot leaves any other group it's added to | |
+  | Allowed group | Only the one group whose `chat.id` is `GROUP_CHAT_ID` (env); the bot leaves any other group it's added to. If `GROUP_CHAT_ID` is unset and the admin adds the bot to a group, it posts the chat id (to put in `.env`) and leaves. A group→supergroup upgrade (`migrate_to_chat_id`) is followed by updating the stored id and logging a warning to update `.env`. | |
 
   Claude can override the default `for_users` when context is clear; the default only applies when ambiguous.
-- **Formatting:** `parse_mode=HTML`; escape `<`, `>`, `&`; split replies at 4096 chars.
+- **Formatting:** `parse_mode=HTML`. Claude writes plain text with a minimal markdown subset (`**bold**`, `_italic_`, `[text](url)`); code escapes `<`, `>`, `&`, converts that subset to HTML and splits at 4096 chars on the plain text first, so tags are always balanced. Claude never emits HTML.
 - **Single poller:** exactly one replica; a second instance causes `409 Conflict` from `getUpdates`. Compose `deploy.replicas` not used; documented in runbook.
 - **Commands:** `/pick <category>`, `/options <category>`, `/remember <text>`, `/forget <text>`, `/think <question>`, `/quiet [duration]`, `/unquiet`, `/help`.
 
@@ -621,7 +643,8 @@ User taps ✅ → callback → status='accepted', pref update, log note appended
 
 By default Telegram bots in groups only receive commands, @mentions and replies ("privacy mode"). To let the bot follow the conversation:
 
-- BotFather → `/setprivacy` → **Disable**, then **remove and re-add** the bot to the group (the setting only applies on join). Alternatively make the bot a group admin, which also bypasses privacy mode.
+- **Recommended:** make the bot a **group admin**. That bypasses privacy mode *and* is required for Telegram to deliver `message_reaction` updates (needed for 👎 feedback, §10.2); `allowed_updates` must include `message_reaction`.
+- Alternative (no reaction feedback): BotFather → `/setprivacy` → **Disable**, then **remove and re-add** the bot to the group (the setting only applies on join).
 - Every group message from an allowlisted user is persisted to `messages`, whether or not the bot replies. This is the context the bot reads when it does step in.
 
 ### 10.2 Speak-or-stay-silent (ambient participation)
@@ -706,7 +729,7 @@ All settings are read from SQLite on each request, so changes apply instantly wi
 | Prompt injection via notes / user text | Tools are narrow; `write_note` path-restricted to vault folders; pinned notes immutable implicitly; no shell/network tools. |
 | Path traversal in note paths | Resolve and enforce `vault_root in path.parents`; reject symlinks. |
 | Bot reads all group messages | Only the configured group, only allowlisted senders persisted. Messages are sent to Anthropic only when the judge or orchestrator runs (a recent window, not the full history). Both users know the bot is listening (stated on join). |
-| Cross-user leakage (in chat) | Owner filter in retrieval and pinned injection; one user's private memories only enter the other's chat when `for_users=both`, and then only constraint-type notes. |
+| Cross-user leakage (in chat) | Owner filter in retrieval and pinned injection; one user's private memories only enter the other's chat when `for_users=both`, and then only constraint-type notes. **Accepted:** facts learned in a DM (`memories/<slug>/`) can surface in group answers, since the group defaults to `for_users=both`. No per-note `private` flag. |
 | Admin visibility | **Decided:** admin (Jack) can see all conversations and all memories, including the partner's, in the dashboard. The bot states this once to each user on first contact (`/start`) so it is transparent. |
 | Data sent to Anthropic | Only the assembled prompt; documented to both users. API data is not used for training by default per Anthropic's commercial terms (verify current terms). |
 
@@ -748,8 +771,10 @@ services:
 ```
 TELEGRAM_BOT_TOKEN=...
 ANTHROPIC_API_KEY=...
-ALLOWED_TELEGRAM_IDS=111111111,222222222
-DASHBOARD_PASSWORD_HASH=$argon2id$...
+ALLOWED_TELEGRAM_IDS=111111111:jack,222222222:partner   # <id>:<slug>; first = admin
+GROUP_CHAT_ID=-100...                                   # optional until the bot has joined (§10)
+TZ=Asia/Singapore                                       # household timezone for day boundaries
+DASHBOARD_PASSWORD_HASH='$argon2id$...'                 # single-quoted: compose interpolates $ in env_file
 SESSION_SECRET=...
 ```
 
@@ -909,11 +934,11 @@ Both people's raw messages are sent to the Anthropic API during extraction, so b
 
 | # | Scope | Done when |
 |---|---|---|
-| M1 | Skeleton: compose, config, SQLite + migrations, aiogram polling, allowlist, group (privacy off) + DM handling, Claude chat with history, mention-only replies | Bot answers when mentioned in the group; others ignored. |
-| M2 | Decision engine: dynamic categories + resolver, options, `random_pick`, inline buttons, feedback learning, fallback | "Dinner?" and "what movie?" each create/resolve a category and return a weighted, non-repeating pick. |
-| M2b | Ambient participation: debounce, stage-1 rules, judge call, cooldown/caps, `/quiet`, `ambient_log` | Bot steps in on "idk you decide" and stays silent through small talk. |
+| M1 | Skeleton: compose, config, SQLite + migrations, aiogram polling, allowlist, group (privacy off) + DM handling, Claude chat with history (last N turns), mention-only replies, `LLMClient` with usage/cost recording and budget checks | Bot answers when mentioned in the group; others ignored. |
+| M2 | Decision engine: `Embedder` (fastembed, model baked into image), dynamic categories + resolver, options, `random_pick`, inline buttons, feedback learning, fallback | "Dinner?" and "what movie?" each create/resolve a category and return a weighted, non-repeating pick. |
+| M2b | Ambient participation: debounce, stage-1 rules, judge call, cooldown/caps, `/quiet`, `ambient_log`, rolling chat summaries | Bot steps in on "idk you decide" and stays silent through small talk. |
 | M3 | Second brain: NoteStore, chunking, fastembed, FTS5 + sqlite-vec, hybrid retrieval, pinned notes, memory tools, inbox | "Remember I hate coriander" changes future picks. |
-| M4 | Dashboard: auth, all pages in §11 (incl. category merge), usage & budget enforcement | All behaviour controllable without touching code. |
+| M4 | Dashboard: auth, all pages in §11 (incl. category merge), usage & budget UI (enforcement itself lands in M1) | All behaviour controllable without touching code. |
 | M5 | Bootstrap import: dashboard upload wizard (§15.2), Telegram JSON/zip parser (single chat + full account), windowing, batch extraction, consolidation, review UI, apply | 6 months of history reviewed and applied; bot knows both users on day one. |
 | M6 | Scheduled nudges (optional), backups, healthcheck, polish, runbook | Runs unattended for 2 weeks. |
 
