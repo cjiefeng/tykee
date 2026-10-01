@@ -1,0 +1,940 @@
+# Design Doc: Tykee — a Claude-powered decision bot for two
+
+| | |
+|---|---|
+| **Status** | Draft v1.7 (import defaults to Opus-tier) |
+| **Name** | Tykee: phonetic spelling of Tyche, the Greek goddess of chance. Telegram handle e.g. `@TykeeBot` (must end in "bot") |
+| **Author** | Jack |
+| **Date** | 2026-10-01 |
+| **Users** | Jack + partner (2 users, fixed) |
+| **Host** | UGREEN DXP4800 Plus (x86, Pentium Gold 8505, 8 GB), Docker on UGOS Pro, LAN-only |
+
+---
+
+## 1. Overview
+
+A private Telegram bot that helps two people make everyday low-stakes decisions ("what's for dinner?", "what should we watch?"). Claude provides reasoning and conversation; a deterministic decision engine provides genuine randomness and anti-repetition; a bot-owned "second brain" (markdown notes + local hybrid search) gives it long-term knowledge of both users. An admin dashboard on the LAN controls behaviour, memory, and cost.
+
+### 1.1 Goals
+
+- Fast, useful answers to everyday decisions inside Telegram.
+- Real randomness with memory: don't suggest the same thing three nights running.
+- Persistent, inspectable, editable long-term memory per user plus shared memory.
+- Full control from a dashboard: persona, models, options, memory, budgets.
+- Simple to run: **one container, one process, one SQLite file + one notes folder.**
+
+### 1.2 Non-goals
+
+- Multi-tenant / more than two users.
+- Human editing of the vault in Obsidian (the second brain is bot-owned; humans edit via the dashboard only).
+- Public internet exposure (no webhooks, no public dashboard).
+- Horizontal scaling / HA. Single replica by design.
+- Voice notes, restaurant/maps APIs, weather (deferred; see §15).
+
+---
+
+## 2. Requirements
+
+### 2.1 Functional
+
+| ID | Requirement |
+|---|---|
+| F1 | Only allowlisted Telegram user IDs can interact; all others are silently ignored. |
+| F2 | Users ask free-form decision questions; bot replies with one pick (default) or N options, with a short reason. |
+| F3 | Inline buttons: **✅ Go with it**, **🎲 Reroll**, **❌ Not this**. Outcomes are recorded. |
+| F4 | Decisions for "me", "partner", or "both" respect each person's hard constraints (allergies, dislikes). |
+| F5 | Bot remembers facts on request ("remember I hate coriander") and can propose memories implicitly. |
+| F6 | Recently chosen options are down-weighted per category with configurable decay. |
+| F7 | Dashboard: edit persona/system prompt, model routing, per-category settings, options lists, memory notes, memory inbox, view conversations, usage & cost, reindex, backup. |
+| F8 | Optional scheduled nudges: the bot starts a conversation at a set time (e.g. 17:30 "dinner idea?") in the group. **Off by default.** |
+| F9 | Decision categories are **inferred and created dynamically** from conversation; no fixed list. Similar categories resolve to one canonical category (§8.1). |
+| F10 | The **shared group** (Jack + partner + bot) is the primary interface. The bot reads all group messages and **decides for itself whether to speak or stay silent** (§10.2). Private DMs remain supported as a secondary channel. |
+| F11 | **Bootstrap** the second brain, categories, options and decision history from the past 6 months of chat history (§15). |
+
+### 2.2 Non-functional
+
+| ID | Requirement |
+|---|---|
+| N1 | p50 reply latency < 4 s (dominated by Claude API). |
+| N2 | Runs within ~1 GB RAM on the NAS. |
+| N3 | All data local except prompts sent to the Anthropic API. |
+| N4 | Survives restarts with no data loss; nightly backups. |
+| N5 | Graceful degradation if Claude API is unavailable (pure random pick from options). |
+| N6 | Daily/monthly API spend cap enforced in code. |
+
+---
+
+## 3. Architecture
+
+### 3.1 Component diagram
+
+```
+                    ┌────────────────────────── tykee container (single Python process, asyncio) ───────────────────────────┐
+ Telegram API ◄────►│ Telegram Adapter (aiogram, long polling)                                                                    │
+ (outbound only)    │        │                                                                                                    │
+                    │        ▼                                                                                                    │
+                    │ Orchestrator ── builds prompt ──► Claude API (tool use loop) ──► Tool Router                                 │
+                    │        │                                                         │        │          │                     │
+                    │        │                                          Decision Engine ◄┘   Second Brain   Settings              │
+                    │        │                                          (weighted random)    (NoteStore +   (hot-reloaded         │
+                    │        │                                                               Retriever +    from SQLite)          │
+                    │        │                                                               Embedder)                            │
+                    │        ▼                                                                    │                               │
+                    │ Scheduler (APScheduler: nudges, backups, reconcile)                         │                               │
+                    │                                                                             │                               │
+ Browser (LAN) ◄───►│ Dashboard (FastAPI + Jinja2 + HTMX, :8080, password login)                  │                               │
+                    └─────────────────────────────────────────────────────────────────────────────┼───────────────────────────────┘
+                                                                                                  ▼
+                                               /data/bot.db  (SQLite: app state + FTS5 + sqlite-vec)    /data/vault/**/*.md (notes)
+                                               └──────────────────────── NVMe volume ─────────────────────────────────────────┘
+```
+
+### 3.2 Key design decisions
+
+| Decision | Choice | Rationale |
+|---|---|---|
+| Process model | Single async process hosting bot, dashboard, scheduler | One SQLite writer, no IPC, trivial deploy. 2 users ≠ scale problem. |
+| Telegram transport | Long polling | NAS is LAN-only; no inbound ports, no TLS certs. |
+| Database | SQLite (WAL) for everything | Small data, single writer, zero ops, file-level backup. |
+| Notes storage | Markdown files on disk = source of truth; SQLite holds a derived, rebuildable index | Human-readable, diffable (git), index can be dropped & rebuilt anytime. |
+| Indexing trigger | Synchronous on write through `NoteStore` (no file watcher) | Only the bot/dashboard write the vault, so every write passes through one API. Startup reconcile catches drift. |
+| Embeddings | Local, `fastembed` (ONNX, CPU) | Private, free, fast enough on the 8505. No PyTorch. |
+| Retrieval | Hybrid: FTS5 BM25 + vector KNN, fused with RRF, + 1-hop wikilink expansion | Exact names need keywords; fuzzy intents need vectors. |
+| Randomness | Done in code, not by the LLM | LLMs are poor at uniform randomness and repeat favourites. |
+| Telegram formatting | `parse_mode=HTML` | MarkdownV2 escaping is a reliable source of crashes. |
+
+---
+
+## 4. Tech stack
+
+| Layer | Choice |
+|---|---|
+| Language | Python 3.12 |
+| Telegram | `aiogram` 3.x |
+| LLM | `anthropic` Python SDK (Messages API, tool use, prompt caching) |
+| Web | `fastapi`, `uvicorn`, `jinja2`, HTMX (vendored, no CDN) |
+| DB | stdlib `sqlite3` (via a single writer thread) + `sqlite-vec` extension + FTS5 |
+| Embeddings | `fastembed` with `intfloat/multilingual-e5-small` (384-d, multilingual; handles English + Chinese, see §6.8) |
+| Notes | `python-frontmatter` |
+| Scheduling | `APScheduler` (AsyncIOScheduler) |
+| Packaging | Docker (`python:3.12-slim`), docker compose on UGOS |
+
+---
+
+## 5. Data model
+
+### 5.1 SQLite configuration
+
+```sql
+PRAGMA journal_mode = WAL;
+PRAGMA synchronous = NORMAL;   -- safe with WAL; fsync on checkpoint
+PRAGMA foreign_keys = ON;
+PRAGMA busy_timeout = 5000;
+```
+
+Concurrency model: one dedicated **writer connection** owned by a single thread (all writes queued through it); a small pool of **read-only connections** for the dashboard and retrieval. CPU-bound work (embedding) runs in a `ThreadPoolExecutor` so the event loop is never blocked.
+
+### 5.2 Schema
+
+```sql
+-- Users ---------------------------------------------------------------
+CREATE TABLE users (
+  id            INTEGER PRIMARY KEY,           -- internal
+  telegram_id   INTEGER NOT NULL UNIQUE,
+  slug          TEXT NOT NULL UNIQUE,           -- 'jack' | 'partner'
+  display_name  TEXT NOT NULL,
+  timezone      TEXT NOT NULL DEFAULT 'UTC',
+  enabled       INTEGER NOT NULL DEFAULT 1
+);
+
+-- Settings (hot-reloaded; dashboard writes, bot reads per request) -------
+CREATE TABLE settings (
+  key         TEXT PRIMARY KEY,                -- e.g. 'persona.system_prompt', 'models.default'
+  value_json  TEXT NOT NULL,
+  updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- Decision categories & options ------------------------------------------
+CREATE TABLE categories (
+  id               INTEGER PRIMARY KEY,
+  slug             TEXT NOT NULL UNIQUE,       -- 'dinner', 'movie', 'weekend-activity' (created dynamically)
+  display_name     TEXT NOT NULL,
+  description      TEXT NOT NULL,              -- one line, used for semantic matching
+  embedding        BLOB,                       -- float32[384] of "display_name: description"
+  recency_tau_days REAL NOT NULL DEFAULT 3.0,  -- decay constant (see §8.3); Claude proposes on creation
+  default_n        INTEGER NOT NULL DEFAULT 1, -- picks per answer
+  allow_generated  INTEGER NOT NULL DEFAULT 1, -- may Claude propose options not in list?
+  created_by       TEXT NOT NULL DEFAULT 'bot',-- 'bot' | 'admin' | 'import'
+  merged_into      INTEGER REFERENCES categories(id), -- set when merged in dashboard; resolver follows it
+  created_at       TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE category_aliases (                 -- phrasings already resolved to a category
+  alias        TEXT PRIMARY KEY,                -- normalised: 'lunch', 'makan', '晚餐'
+  category_id  INTEGER NOT NULL REFERENCES categories(id)
+);
+
+CREATE TABLE options (
+  id           INTEGER PRIMARY KEY,
+  category_id  INTEGER NOT NULL REFERENCES categories(id),
+  name         TEXT NOT NULL,
+  tags_json    TEXT NOT NULL DEFAULT '[]',     -- ['spicy','delivery','cheap']
+  base_weight  REAL NOT NULL DEFAULT 1.0,
+  owner        TEXT NOT NULL DEFAULT 'shared', -- 'jack' | 'partner' | 'shared'
+  active       INTEGER NOT NULL DEFAULT 1,
+  created_by   TEXT NOT NULL DEFAULT 'admin',  -- 'admin' | 'bot'
+  UNIQUE (category_id, name)
+);
+
+-- Per-user preference multiplier on an option (learned from accept/reject)
+CREATE TABLE option_prefs (
+  option_id   INTEGER NOT NULL REFERENCES options(id),
+  user_id     INTEGER NOT NULL REFERENCES users(id),
+  multiplier  REAL NOT NULL DEFAULT 1.0,       -- clamp [0.1, 3.0]
+  PRIMARY KEY (option_id, user_id)
+);
+
+-- Decision log ------------------------------------------------------------
+CREATE TABLE decisions (
+  id           INTEGER PRIMARY KEY,
+  category_id  INTEGER NOT NULL REFERENCES categories(id),
+  option_id    INTEGER REFERENCES options(id), -- NULL if free-text/generated
+  choice_text  TEXT NOT NULL,
+  for_users    TEXT NOT NULL,                  -- 'jack' | 'partner' | 'both'
+  asked_by     INTEGER NOT NULL REFERENCES users(id),
+  status       TEXT NOT NULL,                  -- 'suggested'|'accepted'|'rerolled'|'rejected'
+  source       TEXT NOT NULL DEFAULT 'live',   -- 'live' | 'import'
+  chat_id      INTEGER,                        -- DM or group it happened in
+  created_at   TEXT NOT NULL DEFAULT (datetime('now'))   -- for imports: original message time
+);
+CREATE INDEX ix_decisions_cat_time ON decisions(category_id, created_at);
+
+-- Conversation history ------------------------------------------------------
+CREATE TABLE messages (
+  id          INTEGER PRIMARY KEY,
+  chat_id     INTEGER NOT NULL,
+  user_id     INTEGER REFERENCES users(id),     -- NULL for assistant
+  role        TEXT NOT NULL,                    -- 'user' | 'assistant' | 'tool'
+  content     TEXT NOT NULL,                    -- JSON blocks
+  created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX ix_messages_chat_time ON messages(chat_id, created_at);
+
+CREATE TABLE chat_summaries (                   -- rolling summary of older turns
+  chat_id     INTEGER PRIMARY KEY,
+  summary     TEXT NOT NULL,
+  upto_msg_id INTEGER NOT NULL
+);
+
+-- Second brain index (derived from /data/vault; safe to drop & rebuild) ------
+CREATE TABLE notes (
+  id          INTEGER PRIMARY KEY,
+  path        TEXT NOT NULL UNIQUE,             -- relative to vault root
+  owner       TEXT NOT NULL,                    -- 'jack' | 'partner' | 'shared'
+  type        TEXT NOT NULL,                    -- 'profile'|'preference'|'place'|'fact'|'log'
+  title       TEXT NOT NULL,
+  file_hash   TEXT NOT NULL,                    -- sha256 of file bytes
+  pinned      INTEGER NOT NULL DEFAULT 0,       -- always injected into prompt (core constraints)
+  updated_at  TEXT NOT NULL
+);
+
+CREATE TABLE chunks (
+  id          INTEGER PRIMARY KEY,
+  note_id     INTEGER NOT NULL REFERENCES notes(id) ON DELETE CASCADE,
+  ord         INTEGER NOT NULL,
+  heading     TEXT,                             -- "Food > Dislikes"
+  text        TEXT NOT NULL,                    -- title + heading path + body
+  chunk_hash  TEXT NOT NULL,
+  embed_model TEXT NOT NULL
+);
+
+CREATE TABLE links (                             -- [[wikilinks]] graph
+  src_note_id INTEGER NOT NULL REFERENCES notes(id) ON DELETE CASCADE,
+  dst_path    TEXT NOT NULL,
+  PRIMARY KEY (src_note_id, dst_path)
+);
+
+CREATE VIRTUAL TABLE chunks_fts USING fts5(
+  text, content='chunks', content_rowid='id', tokenize='porter unicode61'
+);
+
+CREATE VIRTUAL TABLE chunks_vec USING vec0(
+  embedding float[384]                          -- rowid = chunks.id
+);
+
+-- Memory inbox (implicit memories awaiting approval) ---------------------------
+CREATE TABLE memory_inbox (
+  id          INTEGER PRIMARY KEY,
+  owner       TEXT NOT NULL,
+  target_path TEXT NOT NULL,
+  content     TEXT NOT NULL,
+  reason      TEXT,                              -- what in the chat triggered it
+  status      TEXT NOT NULL DEFAULT 'pending',   -- 'pending'|'approved'|'rejected'
+  created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- Usage & cost --------------------------------------------------------------------
+CREATE TABLE usage (
+  id                 INTEGER PRIMARY KEY,
+  user_id            INTEGER REFERENCES users(id),
+  model              TEXT NOT NULL,
+  input_tokens       INTEGER NOT NULL,
+  output_tokens      INTEGER NOT NULL,
+  cache_read_tokens  INTEGER NOT NULL DEFAULT 0,
+  cache_write_tokens INTEGER NOT NULL DEFAULT 0,
+  cost_usd           REAL NOT NULL,
+  created_at         TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- Ambient participation (§10.2) ------------------------------------------------------
+CREATE TABLE chat_state (
+  chat_id              INTEGER PRIMARY KEY,
+  muted_until          TEXT,
+  last_unprompted_at   TEXT,
+  unprompted_today     INTEGER NOT NULL DEFAULT 0,
+  cooldown_multiplier  REAL NOT NULL DEFAULT 1.0     -- doubled on negative feedback, reset daily
+);
+
+CREATE TABLE ambient_log (
+  id             INTEGER PRIMARY KEY,
+  chat_id        INTEGER NOT NULL,
+  from_msg_id    INTEGER NOT NULL,                   -- burst range in messages
+  to_msg_id      INTEGER NOT NULL,
+  action         TEXT NOT NULL,                      -- 'respond' | 'silent' | 'skipped_rule'
+  rule           TEXT,                               -- which stage-1 rule fired, if any
+  reason         TEXT,
+  confidence     REAL,
+  feedback       TEXT,                               -- NULL | 'negative' | 'positive'
+  created_at     TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- Bootstrap import (§15) ---------------------------------------------------------
+CREATE TABLE import_jobs (
+  id            INTEGER PRIMARY KEY,
+  source        TEXT NOT NULL,                   -- 'telegram_json'
+  file_sha256   TEXT NOT NULL UNIQUE,            -- same export can't be imported twice
+  since         TEXT NOT NULL,                   -- e.g. now - 6 months
+  status        TEXT NOT NULL,                   -- 'parsed'|'extracting'|'consolidating'|'review'|'done'|'failed'
+  msg_count     INTEGER, window_count INTEGER,
+  cost_usd      REAL NOT NULL DEFAULT 0,
+  created_at    TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE import_windows (                    -- unit of work; makes extraction resumable
+  id            INTEGER PRIMARY KEY,
+  job_id        INTEGER NOT NULL REFERENCES import_jobs(id),
+  chat_ref      TEXT NOT NULL,                   -- which exported chat
+  start_ts      TEXT NOT NULL, end_ts TEXT NOT NULL,
+  text          TEXT NOT NULL,                   -- normalised transcript (deleted when job done)
+  status        TEXT NOT NULL DEFAULT 'pending', -- 'pending'|'submitted'|'done'|'failed'
+  batch_id      TEXT,                            -- Anthropic Message Batches id
+  result_json   TEXT                             -- extracted items
+);
+
+CREATE TABLE import_items (                      -- consolidated proposals awaiting review
+  id            INTEGER PRIMARY KEY,
+  job_id        INTEGER NOT NULL REFERENCES import_jobs(id),
+  kind          TEXT NOT NULL,                   -- 'note'|'category'|'option'|'decision'
+  payload_json  TEXT NOT NULL,
+  evidence_json TEXT NOT NULL,                   -- [{window_id, ts, quote}]
+  confidence    REAL NOT NULL,
+  status        TEXT NOT NULL DEFAULT 'pending'  -- 'pending'|'approved'|'rejected'
+);
+
+CREATE TABLE schema_version (version INTEGER NOT NULL);
+```
+
+Migrations: numbered `.sql` files applied at startup inside a transaction, tracked by `schema_version`.
+
+---
+
+## 6. Second brain
+
+### 6.1 Vault layout
+
+The vault is bot-owned. Humans view/edit it only through the dashboard, so every write goes through `NoteStore`.
+
+```
+/data/vault/
+├── people/
+│   ├── jack.md            # pinned: hard constraints (allergies, strong dislikes, diet)
+│   └── partner.md         # pinned
+├── shared/
+│   ├── household.md       # shared constraints, budget norms, kitchen equipment
+│   ├── places/            # restaurants, hawker stalls, etc.
+│   │   └── <slug>.md
+│   └── topics/            # cuisines, shows, activities
+├── memories/
+│   ├── jack/<slug>.md     # facts learned about Jack
+│   └── partner/<slug>.md
+└── logs/
+    └── 2026/10/2026-10-01.md   # human-readable mirror of decisions (DB is authoritative)
+```
+
+### 6.2 Note format
+
+```markdown
+---
+id: 01JABCXYZ...            # ULID
+owner: jack                 # jack | partner | shared
+type: preference            # profile | preference | place | fact | log
+tags: [food, spicy]
+pinned: false
+source: telegram:msg/12345  # provenance
+created: 2026-10-01T19:02:00+08:00
+updated: 2026-10-01T19:02:00+08:00
+---
+# Spice tolerance
+
+Jack likes spicy food but not numbing (mala) spice. See [[shared/topics/sichuan]].
+```
+
+### 6.3 Write path (`NoteStore`)
+
+1. Validate path (must be under vault root, allowed folder for the operation, `.md`).
+2. Render frontmatter + body; write to `path.tmp`, `fsync`, `rename()` (atomic).
+3. Parse → chunk → diff `chunk_hash` against DB → embed only new/changed chunks (thread pool).
+4. In one SQLite transaction: upsert `notes`, replace `chunks`/`chunks_fts`/`chunks_vec`/`links` for that note.
+5. Mark the vault dirty for the nightly git commit.
+
+**Startup reconcile:** walk the vault, compare `file_hash`; reindex changed files, delete index rows for missing files. **Model change:** if `embed_model` ≠ configured model, full reindex (a few thousand chunks ≈ about a minute on this CPU).
+
+### 6.4 Chunking
+
+- Split on markdown headings (`#`–`###`); merge tiny sections; hard cap ~512 tokens per chunk.
+- Prefix each chunk with `"{title} > {heading path}\n"` so it's self-describing.
+- Most notes will be a single chunk; that's fine.
+
+### 6.5 Retrieval (`search_memory`)
+
+```
+input: query, asker, scope ('me'|'partner'|'both'|'shared'), k=6
+
+1. owner_filter = {asker_slug, 'shared'}          (+ partner's slug if scope == 'both')
+2. fts  = top 30 from chunks_fts MATCH query       → join chunks/notes, filter owner, rank by bm25
+3. vec  = top 30 from chunks_vec KNN(embed(query)) → join, filter owner
+4. fused score per chunk = Σ 1 / (60 + rank_i)     (Reciprocal Rank Fusion)
+5. take top k; add 1-hop [[link]] neighbours of their notes (max 3, owner-filtered, lower score)
+6. return [{path, title, heading, snippet, score}]
+```
+
+KNN over-fetches (30) and filters by owner afterwards; at this data size that's simpler than vec0 metadata partitions and costs nothing.
+
+### 6.6 Pinned context
+
+Notes with `pinned: true` (people profiles, household constraints) are **always** injected into the system prompt for the relevant users. Safety-relevant facts (allergies) must never depend on retrieval recall.
+
+### 6.7 Memory write policy
+
+| Trigger | Behaviour |
+|---|---|
+| Explicit ("remember…", "note that…") | Claude calls `write_note` → written immediately, confirmed in chat. |
+| Implicit (Claude infers a durable fact) | Claude calls `propose_memory` → row in `memory_inbox`; approve/reject in dashboard. Setting `memory.auto_approve` (default **off**) skips the inbox. |
+| Contradiction | Claude must `read_note` first and update in place (`replace_section`), never append a contradicting line. |
+| Forget ("forget that I…") | Claude edits/removes the line; dashboard can delete whole notes. |
+
+Pinned notes can only be modified via the dashboard or an explicit user request, never implicitly.
+
+### 6.8 Language handling (mainly English, some Singlish, a little Chinese)
+
+| Concern | Handling |
+|---|---|
+| Embedding model | `multilingual-e5-small` puts English and Chinese in the same vector space, so "想吃辣的" can match a note saying "likes spicy food". Same 384-d as before; no schema change. |
+| e5 prefixes | e5 models expect `"query: "` on search inputs and `"passage: "` on indexed chunks. Applied inside the `Embedder`; forgetting this noticeably degrades recall. |
+| FTS5 and Chinese | `unicode61` doesn't segment CJK (no spaces), so a run of Chinese characters becomes one token and keyword search barely helps. Accepted trade-off: Chinese recall comes from the vector side of the hybrid search. If that proves weak, add a second `fts5(..., tokenize='trigram')` table as a third RRF input. |
+| Singlish | Claude understands Singlish well, so no special handling in conversation. Retrieval is helped in two ways: (1) the `search_memory` tool description tells Claude to write queries in plain English **plus** any original local terms (e.g. `"takeaway food tapao"`); (2) notes are written in plain English with local terms kept inline (e.g. "Prefers to tapao (takeaway) on weekdays"), so both FTS and vectors match. |
+| Reply language | Persona rule: reply in the language/register the user used; default English. |
+
+---
+
+## 7. Claude integration
+
+### 7.0 LLM provider: Claude API only
+
+**Decided:** every LLM call at runtime goes through the **Anthropic Claude API** (Messages API + Message Batches API) using one `ANTHROPIC_API_KEY` from the Claude Console, billed pay-as-you-go. No Claude subscription, Claude Code or Agent SDK login is used at runtime. Claude Code is used only as a development tool to build Tykee.
+
+| Component | API | Default tier | Section |
+|---|---|---|---|
+| Orchestrator (replies, tool use, memory proposals) | Messages API, tool use, prompt caching | Haiku-tier, escalates to Sonnet-tier | §7.1–7.4 |
+| Speak-or-stay-silent judge | Messages API, structured JSON output, prompt caching | Haiku-tier | §10.2 |
+| Chat history summaries | Messages API | Haiku-tier | §7.2 |
+| Bootstrap import: extraction | **Message Batches API** (async, discounted) | **Opus-tier** (one-off; quality sets the bot's day-one memory) | §15.3 |
+| Bootstrap import: consolidation | Messages API | **Opus-tier** | §15.3 |
+| Embeddings, category resolver, random pick | **None**: local `fastembed` + code | n/a | §6, §8 |
+
+Client rules:
+- A single `LLMClient` wrapper around the official `anthropic` SDK (`AsyncAnthropic`) is the only code allowed to call the API. It applies model selection from `settings`, budget checks before the call, `usage` recording after it, timeouts (30 s interactive, 120 s consolidation), and retries with exponential backoff on 429/5xx/overloaded (max 2 for interactive paths).
+- Model IDs are never hardcoded; they come from `settings` (`models.default`, `models.escalated`, `models.judge`, `models.import_extract`, `models.import_consolidate`), seeded from current Anthropic docs at first run (import keys default to the current Opus model).
+- The price table used for cost tracking lives in `settings` (`pricing.<model>`), editable in the dashboard.
+- If `ANTHROPIC_API_KEY` is missing or invalid at startup, the bot still starts in fallback mode (§8.5) and the dashboard shows a red health tile.
+
+### 7.1 Model routing (all configurable in dashboard)
+
+| Task | Default tier | Notes |
+|---|---|---|
+| Normal chat & decisions | Haiku-tier | Cheap, fast; most traffic. |
+| Complex / multi-constraint planning (e.g. "plan our Saturday") | Sonnet-tier | Escalated by keyword/length heuristic or a `/think` command. |
+| History summarisation | Haiku-tier | Background. |
+
+Model IDs live in `settings` (`models.default`, `models.escalated`), never hardcoded.
+
+### 7.2 Prompt assembly (in cache-friendly order)
+
+```
+system:
+  [1] persona + behaviour rules              (settings: persona.system_prompt)   ┐ cache_control
+  [2] tool usage rules & output format rules                                     │ (static, rarely changes)
+  [3] pinned notes for the user(s) in scope                                      ┘ cache_control
+  [4] dynamic context: now (user TZ), who is asking, chat type, today's decisions
+messages:
+  [5] chat summary (if any) + last N turns (default 12)
+  [6] current user message
+```
+
+Prompt caching on [1]–[3] keeps per-message cost low because they're identical across turns.
+
+### 7.3 Tools exposed to Claude
+
+| Tool | Purpose | Key params |
+|---|---|---|
+| `resolve_category` | Map a free-text decision type to a canonical category, creating one if new (§8.1) | `phrase`, `proposed_slug`, `description`, `proposed_tau_days` |
+| `random_pick` | Weighted random pick(s) via Decision Engine | `category` (slug from `resolve_category`), `n`, `for_users`, `include_tags`, `exclude_tags`, `extra_candidates[]` |
+| `list_options` | View the option list for a category | `category` |
+| `add_option` | Add a new option (e.g. a new restaurant) | `category`, `name`, `tags` |
+| `recent_decisions` | What was chosen recently | `category`, `days` |
+| `search_memory` | Hybrid search over second brain | `query`, `scope`, `k` |
+| `read_note` | Full note content | `path` |
+| `write_note` | Create / append / replace section (explicit memories) | `path`, `mode`, `content`, `heading?` |
+| `propose_memory` | Queue an implicit memory for approval | `owner`, `content`, `reason` |
+
+Tool loop: max 6 tool iterations per user message; on limit, answer with what's available.
+
+### 7.4 Behaviour rules (default persona excerpt)
+
+- Make a decision; don't hedge. Default to **one** pick + one-line reason unless asked for options.
+- Always call `random_pick` for choices within a known category, never "pick randomly" yourself.
+- Respect pinned constraints for everyone in `for_users`.
+- Ask at most one clarifying question, and only if the answer changes the pick materially.
+- Keep replies short; Telegram, not email.
+
+---
+
+## 8. Decision engine
+
+### 8.1 Dynamic categories
+
+There is no fixed category list. Claude decides a message is a decision request, then calls `resolve_category` with the user's phrase and its proposed slug/description. Resolution is deterministic code, so the same kind of decision always lands in the same bucket:
+
+```
+resolve_category(phrase, proposed_slug, description, proposed_tau_days):
+  1. alias hit:   normalise(phrase) or proposed_slug in category_aliases     → return it
+  2. exact slug:  proposed_slug in categories (follow merged_into)           → return it, add alias
+  3. semantic:    cos(embed(proposed_slug + ': ' + description), each category.embedding)
+                  best ≥ 0.85                                                → return it, add alias
+                  0.70 ≤ best < 0.85 → return best but flag 'uncertain' (Claude may override once)
+  4. create:      new category(slug, description, tau = clamp(proposed_tau_days, 0.5, 365),
+                  created_by='bot'), add alias, notify admin in dashboard feed
+```
+
+- Category count stays small (tens), so semantic matching is a brute-force numpy dot product over the `embedding` BLOBs. No vector index needed.
+- Thresholds are settings, tuned after the bootstrap import.
+- **Sprawl control:** the dashboard shows new categories with usage counts and supports **merge** (sets `merged_into`, repoints options/decisions/aliases) and rename.
+- **Empty categories:** a new category has no options. Claude supplies `extra_candidates` from memory + general knowledge. A candidate that gets ✅ accepted is persisted as an option (`created_by='bot'`), so option lists grow organically from real use.
+- Typical τ Claude should propose: meals 2–4 days, snacks/drinks 1 day, movies/shows 14–30 days, weekend activities 7–14 days, trips 90+ days.
+
+### 8.2 Candidate set
+
+1. Active `options` for the category, owner ∈ scope.
+2. Filter by `include_tags` / `exclude_tags` and hard constraints (tags such as `contains:peanut` vs. user's allergy list).
+3. Optionally union `extra_candidates` proposed by Claude (if `allow_generated`), each with weight 1.0.
+
+### 8.3 Weighting
+
+For candidate *i*:
+
+```
+w_i = base_weight_i × pref_i × recency_i
+
+pref_i     = Π over users in for_users of option_prefs.multiplier   (default 1.0)
+recency_i  = 1 − exp(−Δt_i / τ)        Δt_i = days since last 'accepted' pick of i (∞ if never → 1.0)
+τ          = categories.recency_tau_days (dinner default 3.0)
+```
+
+Examples with τ = 3: picked yesterday → 0.28; 3 days ago → 0.63; a week ago → 0.90.
+
+Sampling: `random.SystemRandom().choices(candidates, weights, k=1)`, repeated without replacement for `n > 1`. Options rejected in the *current* conversation get weight 0.
+
+### 8.4 Learning from feedback
+
+| Action | Effect |
+|---|---|
+| ✅ accepted | `decisions.status='accepted'`; `pref × 1.05` (clamped ≤ 3.0); log mirrored to `logs/` |
+| 🎲 reroll | `status='rerolled'`; no pref change; re-run pick excluding it |
+| ❌ not this | `status='rejected'`; `pref × 0.85` (clamped ≥ 0.1) |
+
+### 8.5 Fallback
+
+If Claude is unavailable or the budget is exhausted: the bot matches the message against `category_aliases` (plain substring match), calls `random_pick` directly, and replies with a plain templated message. No alias match → "my brain's offline, try `/pick <category>`".
+
+---
+
+## 9. Request flow
+
+```
+User (Telegram) ─ "what should we eat tonight?"
+  │
+  ├─ Adapter: allowlist check → persist message → typing indicator
+  ├─ Orchestrator: load settings, pinned notes (both users), last N turns
+  ├─ Claude: tool_use search_memory("dinner tonight preferences", scope=both)
+  ├─ Claude: tool_use recent_decisions("dinner", 7)
+  ├─ Claude: tool_use resolve_category("eat tonight", proposed_slug="dinner", ...) → "dinner" (alias hit)
+  ├─ Claude: tool_use random_pick("dinner", n=1, for_users=both, exclude_tags=["heavy"])
+  │     └─ Engine: filter → weight → sample → insert decisions(status='suggested')
+  ├─ Claude: final text "Thai basil chicken from X — you haven't had Thai in 9 days and it's raining."
+  ├─ Adapter: send HTML message + inline keyboard [✅ 🎲 ❌] (callback_data = decision_id)
+  └─ Usage row recorded
+User taps ✅ → callback → status='accepted', pref update, log note appended
+```
+
+---
+
+## 10. Telegram specifics
+
+- **Allowlist:** `ALLOWED_TELEGRAM_IDS` env seeds `users`; any other `from.id` is dropped before any processing or API call.
+- **Chats:** the shared group is primary; DMs are secondary.
+
+  | | Shared group (primary) | Private DM (secondary) |
+  |---|---|---|
+  | Bot sees | **Every message** (privacy mode **off**, see §10.1) | Every message |
+  | Bot replies | When it judges it should (§10.2) | Always |
+  | Default `for_users` | `both`, unless message says "just me/for me" | The sender, unless message says "we/us/both/together" |
+  | History | Per `chat_id` (DM context never shown in the group) | Per `chat_id` |
+  | Memory | Shared second brain across chats; owner filters apply as usual | Same |
+  | Allowed group | Only the one group whose `chat.id` is in settings; the bot leaves any other group it's added to | |
+
+  Claude can override the default `for_users` when context is clear; the default only applies when ambiguous.
+- **Formatting:** `parse_mode=HTML`; escape `<`, `>`, `&`; split replies at 4096 chars.
+- **Single poller:** exactly one replica; a second instance causes `409 Conflict` from `getUpdates`. Compose `deploy.replicas` not used; documented in runbook.
+- **Commands:** `/pick <category>`, `/options <category>`, `/remember <text>`, `/forget <text>`, `/think <question>`, `/quiet [duration]`, `/unquiet`, `/help`.
+
+### 10.1 Seeing all group messages
+
+By default Telegram bots in groups only receive commands, @mentions and replies ("privacy mode"). To let the bot follow the conversation:
+
+- BotFather → `/setprivacy` → **Disable**, then **remove and re-add** the bot to the group (the setting only applies on join). Alternatively make the bot a group admin, which also bypasses privacy mode.
+- Every group message from an allowlisted user is persisted to `messages`, whether or not the bot replies. This is the context the bot reads when it does step in.
+
+### 10.2 Speak-or-stay-silent (ambient participation)
+
+The bot behaves like a quiet friend in the chat: it listens, and only speaks when it adds something. Silence is the default.
+
+**Stage 1: hard rules (code, no LLM call)**
+
+| Situation | Action |
+|---|---|
+| @mention, reply to a bot message, or `/command` | **Always respond** (skips stage 2 and the cooldown) |
+| Group is muted (`/quiet`, or "bot shh" understood earlier) | Silent until mute expires (still logs messages) |
+| Unprompted cooldown active (bot spoke unprompted < `ambient.cooldown_min`, default 20 min, ago) | Silent |
+| Daily unprompted cap reached (`ambient.max_per_day`, default 5) | Silent |
+| Message is only a sticker/photo/emoji | Silent |
+
+**Stage 2: debounce, then a cheap judgement call**
+
+1. **Debounce:** people type in bursts, so wait until the group has been quiet for `ambient.debounce_s` (default 30 s) and judge the whole burst at once, not every line.
+2. **Judge:** one Haiku-tier call with the last ~20 group messages, pinned constraint notes, and today's decisions. It returns structured output:
+   ```json
+   {"action": "respond" | "silent", "reason": "string", "confidence": 0.0}
+   ```
+3. Respond only if `action == "respond"` **and** `confidence ≥ ambient.threshold` (default 0.75). Then run the normal orchestrator flow (§9) to produce the reply.
+
+**Judge guidelines (in its prompt, editable in dashboard):**
+
+| Step in when | Stay silent when |
+|---|---|
+| Explicit indecision: "idk", "anything lah", "you decide", "what to eat ah" | Chit-chat, jokes, logistics ("reaching in 5") |
+| Going back and forth on a choice for several messages with no resolution | A decision was already made ("ok let's do ramen") |
+| A suggestion conflicts with a known constraint (e.g. allergy) | Personal, emotional or relationship conversations |
+| A factual question the second brain can answer ("what was that place we liked in Tiong Bahru?") | Anything it would only add a "+1" or small talk to |
+| | When unsure. Silence is the safe default |
+
+**Feedback loop:**
+- Every judge decision is logged (`ambient_log` table: message window, action, reason, confidence) and viewable in the dashboard, so thresholds can be tuned against what actually happened.
+- If someone reacts 👎 to an unprompted bot message, or says "not now"/"didn't ask", that's logged as a false positive and the cooldown doubles for the rest of the day.
+- "Bot keep quiet" / `/quiet 2h` mutes; `/unquiet` lifts it.
+
+**Cost:** the judge runs once per burst, not per message, on Haiku-tier with the static prompt prefix cached. For a couple's group chat this is plausibly tens of calls per day, i.e. cents. It is still counted in `usage` and the budget caps; when the budget is exhausted ambient mode switches off and only direct mentions get (fallback) answers.
+
+**Implicit memories from group chatter:** since the bot now reads everything, durable facts mentioned in passing ("I'm off seafood this month") can be proposed via `propose_memory`. They go to the inbox for approval (§6.7), never straight into the vault.
+
+### 10.3 Scheduled nudges (optional, off by default)
+
+A nudge means the bot **starts** a conversation without anyone asking, on a schedule. For example, posting "Dinner tonight? I'm thinking Thai, you haven't had it in 9 days 🎲" in the group at 17:30 on weekdays.
+
+- Configured in dashboard: time, days, category, target chat.
+- Skipped automatically if a decision for that category was already made today, or the group is muted.
+- Off by default, since the group is meant to be used on demand.
+
+---
+
+## 11. Admin dashboard
+
+LAN-only at `http://<nas>:8080`. Single admin password (argon2 hash in env), signed session cookie, CSRF tokens on forms. Remote access, if ever needed, via Tailscale, never port-forwarding.
+
+| Page | Contents |
+|---|---|
+| **Overview** | Today's/month's spend vs. caps, message count, recent decisions, health (Telegram poller, last Claude call, index status). |
+| **Behaviour** | Persona/system prompt editor (with version history in `settings`), model per task, max history turns, escalation heuristic, feature toggles (proactive nudges, implicit memory, auto-approve). |
+| **Categories & Options** | Feed of newly created categories with usage counts; merge/rename categories; edit τ, default N, allow_generated, aliases; CRUD options (tags, base weight, owner), view per-user pref multipliers, reset prefs. |
+| **Memory** | Browse vault tree, search (same hybrid retriever), view/edit/delete notes, toggle pinned, **Inbox** approve/reject. |
+| **Import** | Telegram export upload wizard: validate, choose chats/date range, map senders, cost estimate + consent, progress/cancel, review with evidence, apply (§15.2). |
+| **Ambient** | Speak-or-silent settings (debounce, threshold, cooldown, daily cap, judge prompt), `ambient_log` timeline with reasons and feedback, mute status, scheduled nudges. |
+| **Conversations** | Per-chat transcript including tool calls (debugging). |
+| **Users** | Names, Telegram IDs, timezone, nudge schedule. |
+| **System** | Reindex vault, run backup now, download backup, view logs tail. |
+
+All settings are read from SQLite on each request, so changes apply instantly with no restart.
+
+---
+
+## 12. Security & privacy
+
+| Risk | Mitigation |
+|---|---|
+| Strangers using the bot / burning API credit | Telegram ID allowlist enforced before any processing. |
+| Dashboard access | LAN-only bind, password + session, CSRF, no default credentials. |
+| Secrets | `.env` file readable only by container user; never logged; never shown in dashboard. |
+| Prompt injection via notes / user text | Tools are narrow; `write_note` path-restricted to vault folders; pinned notes immutable implicitly; no shell/network tools. |
+| Path traversal in note paths | Resolve and enforce `vault_root in path.parents`; reject symlinks. |
+| Bot reads all group messages | Only the configured group, only allowlisted senders persisted. Messages are sent to Anthropic only when the judge or orchestrator runs (a recent window, not the full history). Both users know the bot is listening (stated on join). |
+| Cross-user leakage (in chat) | Owner filter in retrieval and pinned injection; one user's private memories only enter the other's chat when `for_users=both`, and then only constraint-type notes. |
+| Admin visibility | **Decided:** admin (Jack) can see all conversations and all memories, including the partner's, in the dashboard. The bot states this once to each user on first contact (`/start`) so it is transparent. |
+| Data sent to Anthropic | Only the assembled prompt; documented to both users. API data is not used for training by default per Anthropic's commercial terms (verify current terms). |
+
+---
+
+## 13. Cost control
+
+- Every Claude response's `usage` block is recorded with computed cost (price table in `settings`).
+- `budget.daily_usd` and `budget.monthly_usd` caps: at 80% → dashboard warning; at 100% → fallback mode (§8.5) until reset.
+- Levers: Haiku-tier by default, prompt caching on static system blocks, history capped at N turns plus rolling summary, `max_tokens` capped (default 400) for replies.
+
+---
+
+## 14. Deployment & operations
+
+### 14.1 Compose
+
+```yaml
+services:
+  tykee:
+    build: .
+    container_name: tykee
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      - TZ=Asia/Singapore           # adjust
+    ports:
+      - "8080:8080"                 # dashboard, LAN only
+    volumes:
+      - /volume_nvme/tykee/data:/data        # bot.db, vault/, models cache, backups
+    mem_limit: 1g
+    healthcheck:
+      test: ["CMD", "python", "-m", "app.healthcheck"]
+      interval: 60s
+```
+
+`.env`:
+
+```
+TELEGRAM_BOT_TOKEN=...
+ANTHROPIC_API_KEY=...
+ALLOWED_TELEGRAM_IDS=111111111,222222222
+DASHBOARD_PASSWORD_HASH=$argon2id$...
+SESSION_SECRET=...
+```
+
+Notes:
+- Place `/data` on the **NVMe** volume (SQLite fsync latency, no HDD spin-up delays).
+- Use the official `python:3.12-slim` image; its `sqlite3` supports `enable_load_extension` for `sqlite-vec`.
+- Bake the embedding model into the image at build time (or cache under `/data/models`) so startup works offline.
+
+### 14.2 Backups
+
+| What | How | When |
+|---|---|---|
+| SQLite | `VACUUM INTO '/data/backups/bot-YYYYMMDD.db'` (consistent online copy) | Nightly 03:00, keep 14 |
+| Vault | `git add -A && git commit` inside `/data/vault` | Nightly 03:05 |
+| Whole `/data` | UGOS btrfs snapshot of the share | Daily, per NAS policy |
+
+The vector/FTS index is in the DB backup, but can always be rebuilt from the vault, so the vault plus app tables are what truly matter.
+
+### 14.3 Observability
+
+- Structured JSON logs to stdout (Docker log rotation on).
+- Dashboard health tiles: poller last-update time, Claude error rate (24h), index chunk count, DB size.
+
+### 14.4 Failure modes
+
+| Failure | Behaviour |
+|---|---|
+| Claude API error / timeout | Retry with backoff (2×), then fallback pick + "my brain's offline, here's a random pick". |
+| Budget exhausted | Fallback mode; notify admin via Telegram DM once per day. |
+| Telegram network blip | aiogram polling retries automatically. |
+| Embedding failure on write | Note file still written; chunk marked `embed_model='pending'`; reconcile job retries. |
+| Corrupt/missing index | `System → Reindex` drops index tables and rebuilds from vault. |
+| NAS reboot | `restart: unless-stopped`; startup reconcile. |
+
+---
+
+## 15. Bootstrap import (past 6 months of chat history)
+
+### 15.1 Source: Telegram export, uploaded via the dashboard
+
+**Decided:** Jack exports Telegram chat history manually and uploads it through the dashboard's **Import** page. The Bot API **cannot** read messages from before the bot existed or from chats it isn't in, so an export is the only way to get history.
+
+#### How to export (Telegram Desktop only; the phone apps can't export)
+
+1. Install **Telegram Desktop** (desktop.telegram.org) and log in. The macOS App Store "Telegram for macOS" app has different export options; use Telegram Desktop.
+2. Open the chat to import (your DM with each other, and/or the group).
+3. Click **⋮** (top right) → **Export chat history**.
+4. Untick photos, videos, voice messages, video messages, stickers, GIFs and files. Only text is needed, and it keeps the file small.
+5. **Format: Machine-readable JSON**. Set the date range to "from" 6 months ago if offered.
+6. Export. Telegram writes a folder containing `result.json`. Telegram may ask you to confirm the export on another device, or enforce a short security delay; that's expected.
+7. Repeat per chat. Each upload becomes its own `import_jobs` row.
+
+Also accepted: a **full-account export** (Settings → Advanced → Export Telegram data, JSON). Its `result.json` contains `chats.list[]`, and the dashboard lets you choose which chats to import.
+
+#### Accepted upload formats
+
+| Upload | Handling |
+|---|---|
+| `result.json` (single chat) | Parsed directly. |
+| `result.json` (full-account export) | Parsed; chat picker shown (§15.2 step 3). |
+| `.zip` of the export folder | Only `result.json` is extracted and the rest is ignored. Zip-bomb guard: reject if uncompressed `result.json` > 500 MB or compression ratio > 100×. |
+
+Upload limit 200 MB (configurable). FastAPI streams the upload to `/data/imports/<sha256>.json` rather than holding it in memory.
+
+#### Parsing
+
+Relevant fields: `messages[].type` (`message` vs `service`, skip service), `id`, `date`, `from` (display name), `from_id` (`"user<telegram_id>"`), `text` (either a string or a list of strings/entity objects, flattened to plain text), `reply_to_message_id`, `forwarded_from`. Stickers, photos and voice notes become placeholders like `[photo]` and forwarded messages are prefixed `[fwd]`. Parsing is streaming (`ijson`) so big exports don't spike RAM on the NAS.
+
+Parsers are pluggable (`parse(file) -> Iterator[NormalisedMessage]`), so a WhatsApp `.txt` parser can be added later without touching the rest of the pipeline.
+
+### 15.2 Dashboard import flow
+
+```
+Import page
+ ① Upload ─► ② Validate ─► ③ Choose chats & range ─► ④ Map senders ─► ⑤ Preview & cost ─► ⑥ Run ─► ⑦ Review ─► ⑧ Apply
+```
+
+| Step | What the admin sees / does | Behind the scenes |
+|---|---|---|
+| ① Upload | Drag-and-drop `result.json` or `.zip`, with a link to the export how-to above. | Stream to disk, compute sha256; reject a duplicate file with a link to the earlier job. |
+| ② Validate | "Telegram single-chat export: *Jack & Partner*, 18,432 messages, 2025-09-28 → 2026-09-30" or a clear error. | Detect format (single chat vs full account), check JSON structure, count messages. |
+| ③ Choose chats & range | Checkbox list of chats (full-account exports only). Date range defaults to **last 6 months**. | Filter. Duplicates against earlier imports are skipped by `(chat_ref, telegram message id)`. |
+| ④ Map senders | Table of each distinct sender: name, Telegram id, message count → dropdown **Jack / Partner / Other**. | Auto-mapped where `from_id` matches `users.telegram_id`; anything unmapped defaults to Other (included as context, never an owner of facts). |
+| ⑤ Preview & cost | Message and window counts, a sample of normalised transcript lines, estimated tokens and **estimated USD**, remaining monthly budget. Required checkbox: *"Both participants agreed to this import being processed by the Anthropic API."* | Windowing runs here, so the estimate is exact on input tokens. |
+| ⑥ Run | Progress bar per stage (extracting n/N windows → consolidating → ready for review), live cost so far, **Cancel** button. Safe to close the browser. | Job runs in the scheduler; HTMX polls job status every 5 s. Cancel stops new batch submissions and marks the job `cancelled`. |
+| ⑦ Review | Tabs: **Categories** (review first, see Tuning in §15.5), **Options**, **Notes**, **Decisions**. Each item shows evidence quotes with dates and confidence; edit inline; approve/reject; bulk "approve all ≥ 0.8". | `import_items` rows updated. |
+| ⑧ Apply | Summary ("12 categories, 85 options, 40 notes, 210 decisions") → **Apply**. | Single transaction for DB rows, NoteStore writes for notes, then raw text purge (§15.3 APPLY). Option to delete the uploaded export file (default: delete). |
+
+Schema additions for this flow:
+
+```sql
+ALTER TABLE import_jobs ADD COLUMN chats_json      TEXT;   -- selected chats
+ALTER TABLE import_jobs ADD COLUMN sender_map_json TEXT;   -- {"user123": "jack", ...}
+ALTER TABLE import_jobs ADD COLUMN consent_at      TEXT;   -- when the consent box was ticked
+ALTER TABLE import_jobs ADD COLUMN est_cost_usd    REAL;
+-- status gains: 'uploaded' | 'configured' | 'cancelled'
+```
+
+(In the initial migration these are folded into the `CREATE TABLE`; shown separately here for readability.)
+
+### 15.3 Pipeline
+
+```
+upload + configure in dashboard (§15.2 steps ①–⑤)               import_jobs: configured
+  │  sha256 dedupe · selected chats · date range · sender map applied
+  ▼
+windowing                                                         import_windows: pending
+  │  split on gaps > 2 h or ~6k tokens · lines: "[2026-04-01 19:02] jack: ..."
+  ▼
+EXTRACT (map) – Opus-tier via Message Batches API (async, ~50% cheaper)    → extracting
+  │  per window, JSON-schema output:
+  │   facts:     [{owner, type, statement, quote, ts, confidence}]
+  │   decisions: [{category_phrase, choice, for_users, outcome: chosen|considered|rejected, ts}]
+  │   options:   [{category_phrase, name, tags, sentiment: -1..1}]
+  ▼
+CONSOLIDATE (reduce) – deterministic code + Opus-tier calls         → consolidating
+  │  1. categories: embed all category_phrases → cluster (cos ≥ 0.85) → one Opus call
+  │     names each cluster, writes description, proposes τ
+  │  2. options: normalise names (casefold + rapidfuzz ≥ 90) within category;
+  │     mean sentiment → suggested base_weight / per-user pref multiplier
+  │  3. facts: group by owner, cluster by embedding → one Opus call per cluster merges
+  │     into note sections; newer evidence wins conflicts; drop singletons with confidence < 0.6
+  │  4. decisions: map to consolidated categories, keep original timestamps
+  ▼
+REVIEW (dashboard → Import → job)                                  → review
+  │  grouped by kind; every item shows evidence quotes + dates; edit / approve / reject;
+  │  "approve all ≥ 0.8 confidence" bulk action
+  ▼
+APPLY                                                              → done
+     notes → NoteStore (provenance: source: import:<job_id>)
+     categories → resolver-compatible rows + aliases (created_by='import')
+     options → options (created_by='import'); prefs → option_prefs
+     decisions → decisions(source='import', status='accepted' for chosen)
+     then: null out import_windows.text, VACUUM, optionally delete the uploaded export
+```
+
+**Why imported decisions matter:** they seed the recency penalty and preference multipliers from day one. Without them, the bot would happily suggest what you ate yesterday.
+
+### 15.4 Extraction scope (privacy)
+
+The extraction prompt has an explicit **topic allowlist**: food & drink, places, entertainment, activities, shopping preferences, routines/schedules, dietary restrictions & allergies.
+
+It explicitly **excludes**: health beyond diet/allergies, finances, work matters, relationship disagreements and intimate content, and personal details about third parties. Out-of-scope content is never written to the vault, even if it appears in a window.
+
+Both people's raw messages are sent to the Anthropic API during extraction, so both should agree to the import before it runs. The dashboard enforces this with a required consent checkbox (§15.2 step ⑤), recorded in `import_jobs.consent_at`.
+
+### 15.5 Operational notes
+
+- **Resumable:** each window has its own status; a crash or restart resubmits only `pending`/`failed` windows. Batches are polled by the scheduler (every 5 min) until complete.
+- **Idempotent:** the same export (`file_sha256`) can't be imported twice. A later export overlapping the same period is deduped by `(chat_ref, telegram message id)`.
+- **Cost:** two people over 6 months is plausibly 10–30k messages, i.e. a few hundred thousand input tokens. Defaults are **Opus-tier for both stages**: the import is a one-off whose quality defines the bot's day-one memory, and Opus is noticeably better at implicit preferences, Singlish and half-finished decisions. Rough estimate at current pricing: ~$2 extraction (batch) + ~$1.60 consolidation ≈ **$3–4** total; even at 3× the token estimate, ~$10 once. Both stages remain configurable (`models.import_extract`, `models.import_consolidate`); a cheaper Haiku/Sonnet run can be piloted on one month and compared in the review screen. The dashboard shows an estimate before submission and the job counts against the monthly budget.
+- **Tuning:** the import is the best dataset for tuning the category resolver thresholds (§8.1). Review the proposed categories before approving anything else.
+
+---
+
+## 16. Milestones
+
+| # | Scope | Done when |
+|---|---|---|
+| M1 | Skeleton: compose, config, SQLite + migrations, aiogram polling, allowlist, group (privacy off) + DM handling, Claude chat with history, mention-only replies | Bot answers when mentioned in the group; others ignored. |
+| M2 | Decision engine: dynamic categories + resolver, options, `random_pick`, inline buttons, feedback learning, fallback | "Dinner?" and "what movie?" each create/resolve a category and return a weighted, non-repeating pick. |
+| M2b | Ambient participation: debounce, stage-1 rules, judge call, cooldown/caps, `/quiet`, `ambient_log` | Bot steps in on "idk you decide" and stays silent through small talk. |
+| M3 | Second brain: NoteStore, chunking, fastembed, FTS5 + sqlite-vec, hybrid retrieval, pinned notes, memory tools, inbox | "Remember I hate coriander" changes future picks. |
+| M4 | Dashboard: auth, all pages in §11 (incl. category merge), usage & budget enforcement | All behaviour controllable without touching code. |
+| M5 | Bootstrap import: dashboard upload wizard (§15.2), Telegram JSON/zip parser (single chat + full account), windowing, batch extraction, consolidation, review UI, apply | 6 months of history reviewed and applied; bot knows both users on day one. |
+| M6 | Scheduled nudges (optional), backups, healthcheck, polish, runbook | Runs unattended for 2 weeks. |
+
+Deferred / later: voice notes (requires separate STT), photo input (fridge contents, works with Claude vision), location-aware suggestions (Maps/Places API), weather context, WhatsApp import parser.
+
+---
+
+## 17. Open questions
+
+1. **Consent:** partner agrees to their past messages being processed by the import (§15.4); enforced by the consent checkbox in the wizard.
+
+### Resolved
+
+| Question | Decision |
+|---|---|
+| Language | Mainly English, some Singlish, a little Chinese → `multilingual-e5-small`, see §6.8. |
+| Admin visibility | Admin sees all conversations and memories, see §12. |
+| Chat mode | Both DMs and one shared group, see §10. |
+| Categories | Inferred and created dynamically, with resolver + merge, see §8.1. |
+| Bootstrap | From the past 6 months of chat history, see §15. |
+| LLM provider | Claude API (API key) for all runtime LLM calls; Claude Code for development only, see §7.0. |
+| Import source | Telegram Desktop JSON export, uploaded via the dashboard Import wizard; chats chosen at upload time, see §15.1–15.2. |
+| Group behaviour | Group is primary; bot reads everything and decides when to speak, silent by default, see §10.2. |
+| Scheduled nudges | Supported but off by default, see §10.3. |
