@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **Status** | Draft v1.18 (bot data never in git; CI and deploy.sh, §14.5) |
+| **Status** | Draft v1.19 (M4 topics: sending to General, /settopic anywhere, harvest_runs) |
 | **Name** | Tykee: phonetic spelling of Tyche, the Greek goddess of chance. Telegram handle e.g. `@TykeeBot` (must end in "bot") |
 | **Author** | Jack |
 | **Date** | 2026-10-01 |
@@ -838,12 +838,15 @@ The group has **Topics** enabled. Tykee **reads and learns from every topic**, b
 1. Allowlist + allowed group (§10).
 2. `thread_id` in `ignored_topic_ids` → drop.
 3. Persist message with `thread_id`.
-4. `thread_id == answer_topic_id` (or `answer_topic_id` is NULL) → normal flow: commands, mentions, debounce + judge (§10.2).
-5. Otherwise → stop (no judge, no reply), except the off-topic mention handling above. The message waits for the harvester.
+4. `/settopic` from the admin is handled here, in **any** topic (it's how you move Tykee).
+5. `thread_id == answer_topic_id` (or `answer_topic_id` is NULL) → normal flow: commands, mentions, debounce + judge (§10.2).
+6. Otherwise → stop (no judge, no reply), except the off-topic mention handling above. The message waits for the harvester.
+
+Topic service messages (`forum_topic_created/edited/closed/reopened`) update `forum_topics` and are not stored as chat. Reaction updates carry no topic; they're only used for 👎/👍 on unprompted messages, which exist only in the answer topic, so they need no topic gate. `GROUP_TOPIC_ID` seeds `telegram.answer_topic_id` only when the key doesn't exist yet, so clearing it in the dashboard survives restarts.
 
 #### Sending
 
-Every outbound group message (replies, decision keyboards, ambient interjections, scheduled nudges, budget/admin notices) goes through one `send_to_group()` helper that sets `message_thread_id = answer_topic_id`. Replies via aiogram `message.answer()` already inherit the thread, but anything from the scheduler/orchestrator without an incoming message must use the helper, so nothing slips into General.
+Every outbound group message (replies, decision keyboards, ambient interjections, scheduled nudges, budget/admin notices) goes through one `send_to_group()` helper that sets `message_thread_id = answer_topic_id`. If the answer topic is General (`1`), the message is sent **without** `message_thread_id` (Telegram rejects id 1) but still stored with `thread_id = 1`. Replies via aiogram `message.answer()` already inherit the thread, but anything from the scheduler/orchestrator without an incoming message must use the helper, so nothing slips into General.
 
 #### Memory harvester (other topics → second brain)
 
@@ -915,13 +918,22 @@ CREATE TABLE topic_harvest (
   PRIMARY KEY (chat_id, thread_id)
 );
 -- usage.purpose gains 'harvest'; decisions.source gains 'observed'
+
+CREATE TABLE harvest_runs (               -- one row per LLM harvest, for the dashboard (M4 addition)
+  id INTEGER PRIMARY KEY, chat_id INTEGER NOT NULL, thread_id INTEGER NOT NULL,
+  from_msg_id INTEGER NOT NULL, to_msg_id INTEGER NOT NULL, messages INTEGER NOT NULL,
+  facts INTEGER NOT NULL DEFAULT 0, decisions INTEGER NOT NULL DEFAULT 0,
+  suggestions INTEGER NOT NULL DEFAULT 0, skipped_out_of_scope INTEGER NOT NULL DEFAULT 0,
+  status TEXT NOT NULL,                   -- 'done' | 'error' | 'budget'
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
 ```
 
 Conversation history for replies (§7.2) is per `(chat_id, answer topic)`: Tykee's prompt contains the #Tykee conversation, not the other topics' chatter. What it learned elsewhere reaches it through the second brain (retrieval + pinned notes) and observed decisions.
 
 #### Edge cases
 
-- **Answer topic deleted/closed:** a send failing with a thread error raises a red health tile and DMs the admin to pick a new topic in the dashboard or via `/settopic`. Reading/harvesting continues.
+- **Answer topic deleted/closed:** a send failing with a thread error raises a red health tile and DMs the admin (at most once an hour) to pick a new topic in the dashboard or via `/settopic`, which clears the tile. Reading/harvesting continues.
 - **Topics disabled for the group:** `message_thread_id` disappears, so everything lands in General (`thread_id = 1`). The health tile warns when the answer topic has been silent for 24 h while the group is active.
 - **Group → supergroup migration:** topic ids are kept; only the chat id changes (§10).
 

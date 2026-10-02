@@ -15,6 +15,7 @@ from aiogram import BaseMiddleware
 from aiogram.types import Chat, ChatMemberUpdated, TelegramObject, Update, User
 
 from app.db.repos.users import UserRecord
+from app.health import HealthState
 from app.telegram.formatting import escape
 from app.telegram.gateway import ChatGateway
 from app.telegram.group import GroupRegistry
@@ -45,7 +46,9 @@ class AccessGate(BaseMiddleware):
         users: list[UserRecord],
         registry: GroupRegistry,
         gateway: ChatGateway,
+        health: HealthState | None = None,
     ) -> None:
+        self._health = health
         self._users = users
         self._by_tg = {u.telegram_id: u for u in users}
         self._registry = registry
@@ -53,6 +56,8 @@ class AccessGate(BaseMiddleware):
 
     async def __call__(self, handler: Handler, event: TelegramObject, data: dict[str, Any]) -> Any:
         assert isinstance(event, Update)
+        if self._health is not None:
+            self._health.saw_update()
         if event.my_chat_member is not None:
             await self._on_membership(event.my_chat_member)
             return None

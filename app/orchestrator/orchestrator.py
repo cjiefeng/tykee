@@ -44,6 +44,7 @@ FALLBACK_EMPTY = "🤔"
 class ChatContext:
     chat_id: int
     is_group: bool
+    thread: int | None = None  # history filter: the answer topic in a forum group (§10.4)
 
 
 @dataclass(frozen=True)
@@ -119,7 +120,9 @@ class Orchestrator:
     ) -> Reply:
         s = await self._settings.load()
         rows = await self._db.read(
-            lambda conn: messages_repo.recent(conn, chat.chat_id, s.history_max_turns)
+            lambda conn: messages_repo.recent(
+                conn, chat.chat_id, s.history_max_turns, only_thread=chat.thread
+            )
         )
         summary = await self._db.read(lambda conn: summaries_repo.get(conn, chat.chat_id))
         messages: list[MessageParam] = build_messages(

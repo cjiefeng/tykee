@@ -26,6 +26,7 @@ from app.db.database import Database
 from app.db.migrate import apply_migrations
 from app.db.repos.users import UserRecord, load_enabled, upsert_allowlist
 from app.decisions.service import DecisionService
+from app.health import HealthState
 from app.llm.client import AnthropicLLMClient
 from app.logging import setup_logging
 from app.orchestrator.orchestrator import Orchestrator
@@ -36,6 +37,7 @@ from app.telegram.addressing import BotIdentity
 from app.telegram.gateway import AiogramGateway
 from app.telegram.group import GroupRegistry, resolve_group_id
 from app.telegram.middleware import AccessGate
+from app.telegram.topics import TopicService, seed_answer_topic
 
 log = logging.getLogger("app")
 
@@ -75,6 +77,7 @@ async def run(env: Env) -> None:
     allowlist = env.allowlist
 
     def _bootstrap(conn: sqlite3.Connection) -> tuple[int | None, list[UserRecord]]:
+        seed_answer_topic(conn, env.group_topic_id)  # before seeds: env only fills a missing key
         seed_settings(conn)
         upsert_allowlist(conn, allowlist, env.tz)
         return resolve_group_id(conn, env.group_chat_id), load_enabled(conn, allowlist)
@@ -126,7 +129,17 @@ async def run(env: Env) -> None:
         decisions = DecisionService(
             db=db, settings=settings, users=users, constraints=memory.avoid_tags
         )
-        summarizer = Summarizer(db=db, settings=settings, llm=llm, users=users, tz=tz)
+        health = HealthState()
+        registry = GroupRegistry(db, group_id)
+        topics = TopicService(db=db, settings=settings, group_id=lambda: registry.group_id)
+        summarizer = Summarizer(
+            db=db,
+            settings=settings,
+            llm=llm,
+            users=users,
+            tz=tz,
+            history_thread=topics.history_thread,
+        )
         orchestrator = Orchestrator(
             db=db,
             settings=settings,
@@ -146,6 +159,7 @@ async def run(env: Env) -> None:
             users=users,
             tz=tz,
             memory=memory,
+            history_thread=topics.history_thread,
         )
         adapter = TelegramAdapter(
             db=db,
@@ -157,10 +171,12 @@ async def run(env: Env) -> None:
             users=users,
             tz=tz,
             memory=memory,
+            topics=topics,
+            health=health,
         )
         dp = Dispatcher()
         dp.update.outer_middleware(
-            AccessGate(users=users, registry=GroupRegistry(db, group_id), gateway=gateway)
+            AccessGate(users=users, registry=registry, gateway=gateway, health=health)
         )
         dp.include_router(adapter.router())
         log.info("polling", extra={"bot": me.username})

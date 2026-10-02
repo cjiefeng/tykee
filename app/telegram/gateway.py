@@ -30,12 +30,14 @@ class ChatGateway(Protocol):
         text: str,
         reply_to: int | None = None,
         keyboard: Keyboard | None = None,
+        thread_id: int | None = None,
     ) -> list[int]:
         """Send model/plain text (rendered to HTML, split). The keyboard goes on the last chunk.
+        ``thread_id`` is the forum topic's ``message_thread_id`` (None = General / no topics).
         Returns sent message ids."""
         ...
 
-    async def send_html(self, chat_id: int, html: str) -> int:
+    async def send_html(self, chat_id: int, html: str, thread_id: int | None = None) -> int:
         """Send pre-rendered, already-escaped HTML (≤ 4096 chars)."""
         ...
 
@@ -45,7 +47,9 @@ class ChatGateway(Protocol):
 
     async def answer_callback(self, callback_id: str, text: str) -> None: ...
 
-    def typing(self, chat_id: int) -> AbstractAsyncContextManager[object]: ...
+    def typing(
+        self, chat_id: int, thread_id: int | None = None
+    ) -> AbstractAsyncContextManager[object]: ...
 
     async def leave_chat(self, chat_id: int) -> None: ...
 
@@ -71,6 +75,7 @@ class AiogramGateway:
         text: str,
         reply_to: int | None = None,
         keyboard: Keyboard | None = None,
+        thread_id: int | None = None,
     ) -> list[int]:
         chunks = to_html_chunks(text)
         ids: list[int] = []
@@ -84,14 +89,15 @@ class AiogramGateway:
                 chat_id,
                 chunk,
                 reply_parameters=reply,
+                message_thread_id=thread_id,
                 link_preview_options=LinkPreviewOptions(is_disabled=True),
                 reply_markup=_markup(keyboard) if i == len(chunks) - 1 else None,
             )
             ids.append(msg.message_id)
         return ids
 
-    async def send_html(self, chat_id: int, html: str) -> int:
-        msg = await self._bot.send_message(chat_id, html)
+    async def send_html(self, chat_id: int, html: str, thread_id: int | None = None) -> int:
+        msg = await self._bot.send_message(chat_id, html, message_thread_id=thread_id)
         return msg.message_id
 
     async def set_keyboard(self, chat_id: int, message_id: int, keyboard: Keyboard | None) -> None:
@@ -109,8 +115,10 @@ class AiogramGateway:
         except TelegramAPIError:
             log.debug("answer_callback_query failed")
 
-    def typing(self, chat_id: int) -> AbstractAsyncContextManager[object]:
-        return ChatActionSender.typing(chat_id=chat_id, bot=self._bot)
+    def typing(
+        self, chat_id: int, thread_id: int | None = None
+    ) -> AbstractAsyncContextManager[object]:
+        return ChatActionSender.typing(chat_id=chat_id, bot=self._bot, message_thread_id=thread_id)
 
     async def leave_chat(self, chat_id: int) -> None:
         try:
