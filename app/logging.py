@@ -51,5 +51,7 @@ def setup_logging(level: str = "INFO") -> None:
     root = logging.getLogger()
     root.handlers[:] = [handler, LOG_BUFFER]
     root.setLevel(level.upper())
-    for noisy in ("httpx", "httpcore", "aiogram.event"):
+    # httpx2: the Anthropic SDK's HTTP client (a line per request); apscheduler: two lines per job
+    # run, and the scheduler runs several code-only jobs every minute.
+    for noisy in ("httpx", "httpx2", "httpcore", "aiogram.event", "apscheduler"):
         logging.getLogger(noisy).setLevel(logging.WARNING)

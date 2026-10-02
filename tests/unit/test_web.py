@@ -76,7 +76,11 @@ async def test_ramen_question_gets_short_cited_answer(env: Env) -> None:
     seed = seed_values()
     assert tools["web_search"]["type"] == seed["web.tool_versions"]["web_search"]
     assert tools["web_search"]["max_uses"] == seed["web.search_max_uses"]
-    assert tools["web_search"]["user_location"]["country"] == "SG"
+    assert tools["web_search"]["user_location"] == {
+        "type": "approximate",
+        "city": "Singapore",
+        "timezone": "Asia/Singapore",
+    }
     assert tools["web_fetch"]["type"] == seed["web.tool_versions"]["web_fetch"]
     assert tools["web_fetch"]["max_uses"] == seed["web.fetch_max_uses"]
     assert "allowed_domains" not in tools["web_search"]

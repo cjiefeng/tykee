@@ -1,12 +1,14 @@
 from __future__ import annotations
 
+import json
+import shutil
 import sqlite3
 from pathlib import Path
 
 import pytest
 
 from app.db.database import open_writer
-from app.db.migrate import apply_migrations, current_version, discover
+from app.db.migrate import MIGRATIONS_DIR, apply_migrations, current_version, discover
 
 EXPECTED_TABLES = {
     "users", "settings", "categories", "category_aliases", "options", "option_prefs",
@@ -71,3 +73,25 @@ def test_gap_in_numbering_is_rejected(tmp_path: Path) -> None:
     (tmp_path / "0003_c.sql").write_text("SELECT 1;")
     with pytest.raises(RuntimeError):
         discover(tmp_path)
+
+
+def test_0013_drops_unsupported_sg_country_from_web_location(tmp_path: Path) -> None:
+    before = tmp_path / "before"
+    before.mkdir()
+    for m in sorted(MIGRATIONS_DIR.glob("*.sql"))[:12]:
+        shutil.copy(m, before / m.name)
+    conn = open_writer(tmp_path / "t.db")
+    apply_migrations(conn, before)
+    old = json.dumps(
+        {"type": "approximate", "city": "Singapore", "country": "SG", "timezone": "Asia/Singapore"}
+    )
+    conn.execute("INSERT INTO settings (key, value_json) VALUES ('web.user_location', ?)", (old,))
+    apply_migrations(conn)
+    (value,) = conn.execute(
+        "SELECT value_json FROM settings WHERE key = 'web.user_location'"
+    ).fetchone()
+    assert json.loads(value) == {
+        "type": "approximate",
+        "city": "Singapore",
+        "timezone": "Asia/Singapore",
+    }

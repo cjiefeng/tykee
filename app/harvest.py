@@ -306,7 +306,9 @@ class Harvester:
             if b.new_msgs >= s.harvest_min_new_messages
             or now - b.oldest_new > timedelta(hours=s.harvest_max_age_hours)
         ]
-        log.info(
+        # Every minute: INFO only when there's work, so idle ticks don't flood the log.
+        log.log(
+            logging.INFO if due else logging.DEBUG,
             "harvest tick",
             extra={"topics_with_new": len(backlog), "due": [b.thread_id for b in due]},
         )

@@ -51,7 +51,7 @@
   "web.fetch_max_uses": 2,
   "web.fetch_max_content_tokens": 4000,
   "web.daily_search_cap": 50,
-  "web.user_location": {"type": "approximate", "city": "Singapore", "country": "SG", "timezone": "Asia/Singapore"},
+  "web.user_location": {"type": "approximate", "city": "Singapore", "timezone": "Asia/Singapore"},
   "web.allowed_domains": [],
   "web.blocked_domains": [],
   "web.tool_versions": {"web_search": "web_search_20250305", "web_fetch": "web_fetch_20250910"},
