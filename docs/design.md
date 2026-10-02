@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **Status** | Draft v1.25 (M7 web access: search + fetch server tools, gating, web memory safety) |
+| **Status** | Draft v1.26 (place recommendations with pet-friendly filter, M9, §10.6; no Google Places API) |
 | **Name** | Tykee: phonetic spelling of Tyche, the Greek goddess of chance. Telegram handle e.g. `@TykeeBot` (must end in "bot") |
 | **Author** | Jack |
 | **Date** | 2026-10-01 |
@@ -574,6 +574,9 @@ Prompt caching on [1]–[3] keeps per-message cost low because they're identical
 | `read_note` | Full note content | `path` |
 | `write_note` | Create / append / replace section (explicit memories) | `path`, `mode`, `content`, `heading?` |
 | `propose_memory` | Queue an implicit memory for approval | `owner`, `content`, `reason` |
+| `find_places` *(M9)* | Recommend places near an area, filtered by must-haves (e.g. pet-friendly); code-ranked from known places, signals when web discovery is needed (§10.6) | `area?`, `near_maps_url?`, `anchor_place_id?`, `category`, `must[]`, `prefer[]`, `radius_m`, `n` |
+| `save_place_candidates` *(M9)* | Store places found via web search as `unvisited`, with attributes + evidence | `[{name, area, address?, attributes{}, evidence_url}]` |
+| `set_place_attribute` *(M9)* | Record an attribute a user stated ("dogs OK at X") | `place_id`, `key`, `value`, `evidence` |
 | `record_decision` *(M8)* | Record a choice the users made themselves (e.g. a pasted Maps link + "eating here"), so recency and history stay correct | `category`, `choice`, `for_users`, `place_id?` |
 | `web_search` *(server tool, M7)* | Live web search run by Anthropic; results come back with citations | configured via settings (§7.5), not by Claude |
 | `web_fetch` *(server tool, M7)* | Fetch a specific URL (e.g. a restaurant page from search results or a link a user pasted) | configured via settings (§7.5) |
@@ -999,7 +1002,7 @@ URLs are taken from message entities (`url`, `text_link`), not just regex on the
    - `/maps/search/<query>/@lat,lng…` → name = query (lower confidence).
    - Only coordinates → unnamed place.
 3. **Cache** every resolution in `place_links` (by original URL), so the same link is never fetched twice.
-4. **Fallbacks when no name is found:** if M7 is enabled, the orchestrator may use web search on the coordinates when someone actually asks about it; otherwise Tykee asks "which place is this?" only if it's in the answer topic and relevant. An optional Places API lookup (`GOOGLE_MAPS_API_KEY`, off by default) can be added later behind the same interface.
+4. **Fallbacks when no name is found:** if M7 is enabled, the orchestrator may use web search on the coordinates when someone actually asks about it; otherwise Tykee asks "which place is this?" only if it's in the answer topic and relevant. **Decided:** the Google Places API is **not** used anywhere in Tykee (cost, API key); all place data comes from links, chat and web search.
 
 #### What happens with a resolved place
 
@@ -1049,6 +1052,161 @@ ALTER TABLE decisions ADD COLUMN place_id INTEGER REFERENCES places(id);
 #### Failure handling
 
 Resolver errors (timeout, Google consent/interstitial page, blocked host, unparseable URL) never break message handling: the message is stored as-is, `place_links.status` records the failure, and it's retried once by the nightly job. Dashboard → Memory → **Places** lists places (rename, merge duplicates, delete) and recent link resolutions with their status.
+
+### 10.6 Place recommendations, incl. pet-friendly (M9)
+
+Ask Tykee for recommendations around a place, optionally with must-haves:
+
+> **Jack:** @Tykee brunch around Tiong Bahru, pet friendly
+>
+> **Tykee:** 3 picks near Tiong Bahru 🐶
+> 1. **Merci Marcel**: you both rated it in May · 🐶 outdoor seating only (you confirmed) · [Map](…)
+> 2. **Ottomani**: not been in 6 weeks · 🐶 dogs OK (per website, checked Jun) · [Map](…)
+> 3. 🆕 **Plain Vanilla**: new to you · 🐶 "pet-friendly outdoor area" (per web, unverified, call ahead) · [Map](…)
+>
+> [✅ 1] [✅ 2] [✅ 3] [🎲 more]
+
+**Decided: no Google Places API.** Everything below works from Tykee's own place memory (M8), a local area list, and web search (M7). Depends on **M7 and M8**.
+
+#### Flow
+
+```
+"brunch around Tiong Bahru, pet friendly"
+  │  Claude calls find_places(area="Tiong Bahru", category="brunch", must=["pet_friendly"], n=3)
+  ▼
+1. LOCATE (code)        areas gazetteer → centre + radius
+                        or near_maps_url → M8 resolver gives coordinates
+                        or anchor_place_id ("near Merci Marcel")
+  ▼
+2. KNOWN (code, free)   places within radius (haversine) or with matching area text
+                        → must-have filter → score → weighted random pick
+  ▼
+3. DISCOVER (M7)        only if find_places returns suggest_web=true
+                        (shortfall < n, or explore slot to fill)
+                        → 1–2 web searches ("pet friendly brunch Tiong Bahru")
+                        → save_place_candidates(...) stores finds as 'unvisited' with evidence
+  ▼
+4. COMPOSE (Claude)     known picks + new finds, one line each, attribute provenance,
+                        Maps link, buttons [✅ n] [🎲 more]
+  ▼
+5. FEEDBACK (code)      ✅ → record_decision(place_id) (place becomes visited + option)
+                        🎲 → find_places again excluding shown places
+```
+
+#### 1. Locating the area (no API)
+
+- **`areas` gazetteer**, seeded from public data (data.gov.sg): Singapore planning areas/subzones and MRT/LRT stations, plus hand-added neighbourhoods. Each has a centre point, default radius (e.g. 1,000 m for a station, 1,500 m for a neighbourhood) and aliases ("TB", "Tiong Bahru MRT", "中峇鲁").
+- Matching is code: alias normalisation (§8.1 rules), then fuzzy match (rapidfuzz ≥ 90). If nothing matches, Claude asks "which area do you mean?" rather than guessing. No online geocoder is used.
+- `near_maps_url`: a Maps link pasted with the request ("somewhere near here 👉 link") is resolved by the M8 resolver to coordinates.
+- **"Near home" / "near us":** home addresses are never stored (§10.5 privacy rule). Instead the dashboard lets you save **named areas at neighbourhood level** (e.g. `home area = Bishan`), stored in `areas` with `source='user'`. Tykee resolves "near home" to that neighbourhood centre, never an exact address.
+
+#### 2. Place attributes with provenance
+
+Pet-friendliness (and future attributes like `kid_friendly`, `halal`, `aircon`, `quiet`) live in a provenance-tracked table, not in free text:
+
+| Value (`pet_friendly`) | Meaning |
+|---|---|
+| `yes` | Dogs allowed (indoors or anywhere) |
+| `outdoor_only` | Only in outdoor/alfresco seating; common in Singapore |
+| `no` | Not allowed |
+| `unknown` | No information |
+
+| Source | Trust | Shown as | How it gets there |
+|---|---|---|---|
+| `user` | Highest; never expires | "you confirmed" | `set_place_attribute` when one of you says so in #Tykee; the memory harvester extracts it from other topics ("brought Mochi to X, they had a water bowl"). Pets and places are safe topics (§15.4). |
+| `web` | Unverified; stale after `recommend.web_attr_ttl_days` (default 180) | "per <site>, checked <month>, call ahead" | `save_place_candidates` during discovery, with the evidence URL/quote |
+
+- A `user` value always overrides a `web` value. Conflicting web sources → `unknown` with both evidences kept.
+- Web-sourced **attributes are labels on a place row, not memories**: they never touch the vault, so the M7 rule "web facts never enter the vault without approval" still holds. Only user-sourced attributes are also written into the place note (`shared/places/<slug>.md`).
+
+**Must-have filtering:** `must=["pet_friendly"]` passes `yes` and `outdoor_only` (shown distinctly). `unknown` places are excluded from the main picks; if there's a shortfall they may appear under a separate "maybe, couldn't confirm" line. `no` is always excluded.
+
+#### 3. Pets
+
+`shared/household.md` gets structured frontmatter parsed by code:
+
+```yaml
+pets:
+  - name: Mochi
+    species: dog
+    size: small        # small | medium | large
+```
+
+When a message mentions a pet by name ("bringing Mochi"), Claude adds `pet_friendly` to `must` without being told. Size is kept for places that state size limits ("small dogs only"); such limits are stored as the attribute's evidence and shown in the reply.
+
+#### 4. Ranking (code)
+
+For each known candidate passing the filters:
+
+```
+score = distance_fit × liked × recency × trust
+
+distance_fit = 1.0 within radius/2, falling linearly to 0.3 at the radius edge
+               (text-area match without coordinates = 0.7)
+liked        = per-user pref multiplier for the place's option (§8.4), default 1.0
+recency      = 1 − exp(−Δt/τ) with the category's τ (§8.3); never visited = 1.0
+trust        = 1.0 user-confirmed attributes · 0.8 web-sourced · 0.6 'maybe'
+```
+
+- Sample `n` picks by weighted random from the top ~8 (no replacement), same RNG as §8.3, so answers vary.
+- **Explore slot:** `recommend.explore_ratio` (default 1 in 3 picks) is reserved for a new place; `find_places` returns `suggest_web=true` when that slot can't be filled from `unvisited` places already known in the area, or when known matches < `n`.
+- Shown places are remembered per conversation so 🎲 never repeats them.
+
+#### 5. Places found on the web
+
+- Claude extracts name, area and, if present, street address from search results, then calls `save_place_candidates`. Rows are created in `places` with `status='unvisited'`, `lat/lng` NULL (no geocoding API), and `area` matched to the gazetteer by text.
+- Dedup against existing places by normalised name + area before insert.
+- **Map links without an API:** `maps_url` is a Google Maps **search URL** (`https://www.google.com/maps/search/?api=1&query=<name>+<area or address>`), which opens the right place in the Maps app for free. Once someone pastes a real share link or taps ✅ and later shares a link, M8 fills in exact coordinates.
+- An unvisited place becomes a normal option (and gets a vault note) only after ✅ or a recorded decision.
+
+#### Settings (dashboard → Behaviour → Recommendations)
+
+| Key | Default | Purpose |
+|---|---|---|
+| `recommend.default_n` | 3 | Picks per reply |
+| `recommend.default_radius_m` | 1500 | Used when the area has no radius |
+| `recommend.explore_ratio` | 0.34 | Share of picks reserved for new places |
+| `recommend.web_attr_ttl_days` | 180 | When web-sourced attributes count as stale |
+| `recommend.max_web_searches` | 2 | Per recommendation request (within the M7 caps) |
+
+Dashboard → Memory → **Places** gains: attribute view/edit with source and date, filter by area and attribute, and the user-defined areas list.
+
+#### Data model (M9 migration)
+
+```sql
+ALTER TABLE places ADD COLUMN status  TEXT NOT NULL DEFAULT 'visited';  -- 'visited' | 'unvisited'
+ALTER TABLE places ADD COLUMN area_id INTEGER REFERENCES areas(id);
+ALTER TABLE places ADD COLUMN address TEXT;                              -- from link or web result
+
+CREATE TABLE areas (
+  id         INTEGER PRIMARY KEY,
+  name       TEXT NOT NULL UNIQUE,            -- 'Tiong Bahru'
+  kind       TEXT NOT NULL,                   -- 'planning_area'|'subzone'|'mrt'|'neighbourhood'|'user'
+  lat        REAL NOT NULL, lng REAL NOT NULL,
+  radius_m   INTEGER NOT NULL,
+  source     TEXT NOT NULL DEFAULT 'seed'     -- 'seed' | 'user'
+);
+CREATE TABLE area_aliases (
+  alias      TEXT PRIMARY KEY,                -- normalised: 'tb', 'tiong bahru mrt', '中峇鲁'
+  area_id    INTEGER NOT NULL REFERENCES areas(id)
+);
+
+CREATE TABLE place_attributes (
+  place_id   INTEGER NOT NULL REFERENCES places(id),
+  key        TEXT NOT NULL,                   -- 'pet_friendly', later others
+  value      TEXT NOT NULL,                   -- pet_friendly: 'yes'|'outdoor_only'|'no'|'unknown'
+  source     TEXT NOT NULL,                   -- 'user' | 'web'
+  evidence   TEXT,                            -- quote, URL, or size limit note
+  checked_at TEXT NOT NULL,
+  PRIMARY KEY (place_id, key)
+);
+```
+
+(`places.maps_url` stays NOT NULL: web finds get the search URL above.)
+
+#### Cost
+
+Known-places answers cost one normal orchestrator call. Discovery adds 1–2 web searches plus their result tokens, inside the M7 daily cap and budget rules; when web tools are disabled (cap or budget), Tykee answers from known places only and says so if there's a shortfall.
 
 ---
 
@@ -1421,8 +1579,9 @@ Both people's raw messages are sent to the Anthropic API during extraction, so b
 | M6 | Scheduled nudges (optional), backups, healthcheck, polish, runbook | Runs unattended for 2 weeks. |
 | M7 | Web access (§7.5): web search + fetch server tools on the orchestrator call, `web.*` settings + dashboard toggles, persona rules, web-sourced memory → inbox only, usage/cost recording of searches & fetches, daily cap + budget-based disable, error fallback | "Is that new ramen place in Tanjong Pagar any good?" gets a short, cited answer; a web fact never lands in the vault without approval; tests pass offline with web tools faked. |
 | M8 | Google Maps links → places (§10.5): entity-based link detection incl. Telegram venue/location messages, `PlaceResolver` (allowlisted redirects, tolerant URL parser, cache), message annotation, `places` + vault place notes, `record_decision` tool + 📍 reaction, harvester support, import pre-resolution, named-business-only privacy rule, dashboard Places list. **Independent of M7**; can be built before it. | Pasting a Maps link with "eating here" in #Tykee gets a 📍 reaction, "where are we eating?" answers with the shop name and link, and a link to someone's home is never stored. |
+| M9 | Place recommendations (§10.6): `areas` gazetteer seed (planning areas, subzones, MRT/LRT, aliases) + user neighbourhood areas, `find_places` / `save_place_candidates` / `set_place_attribute` tools, `place_attributes` with provenance (`user` vs `web`, TTL), pet-friendly must-have filter incl. `outdoor_only`, pets in `household.md`, code ranking + weighted random + explore slot, web discovery with search-URL map links, 🎲 more, dashboard Places/Recommendations settings. **No Google Places API.** Depends on M7 + M8. | "Brunch around Tiong Bahru, pet friendly" returns 3 picks with Map links and labelled pet-friendly sources; a user-confirmed attribute beats a web one; "near home" never uses an exact address. |
 
-Deferred / later: voice notes (requires separate STT), photo input (fridge contents, works with Claude vision), location-aware suggestions (Maps/Places API), weather context, WhatsApp import parser.
+Deferred / later: voice notes (requires separate STT), photo input (fridge contents, works with Claude vision), weather context, WhatsApp import parser.
 
 ---
 
@@ -1444,6 +1603,7 @@ Deferred / later: voice notes (requires separate STT), photo input (fridge conte
 | Web access | Agent with Anthropic server-side web search/fetch, orchestrator only, capped, web-sourced memories need approval. Milestone M7, see §7.5. |
 | Import source | Telegram Desktop JSON export, uploaded via the dashboard Import wizard; chats chosen at upload time, see §15.1–15.2. |
 | Group behaviour | Group is primary; bot reads everything and decides when to speak, silent by default, see §10.2. |
+| Place recommendations | Recommendations around an area with must-haves like pet-friendly, from known places + web discovery, with attribute provenance. **No Google Places API.** Milestone M9, see §10.6. |
 | Google Maps links | Resolved in code (no API, no LLM) to a named place; recorded as a decision when you say you're going; only named businesses stored. Milestone M8, see §10.5. |
 | Group topics | Tykee reads and builds memory from **all** topics (except an optional ignore list) but only speaks in one **answer topic** (initially #Tykee), changeable from the dashboard. Enforced in code; milestone M4, see §10.4. |
 | Scheduled nudges | Supported but off by default, see §10.3. |

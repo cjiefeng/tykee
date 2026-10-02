@@ -165,10 +165,13 @@ loop, and update `docs/design.md` in the same commit as any behaviour change.
 | M6 ✅ | Scheduled nudges, backups, healthcheck, runbook |
 | M7 ✅ | Web search and fetch, with cited answers |
 | M8 🚧 | Google Maps links → places: resolve pasted links to a named shop (no API, no LLM), record "eating here" as a decision, never store home addresses |
+| M9 | Place recommendations: "brunch around Tiong Bahru, pet friendly" picks from known places plus web discovery, with must-have filters and a source for each attribute (you confirmed vs. per website) |
 
 Details and acceptance criteria are in design §16.
 
 ## Privacy
 
-Everything stays on the server except the prompts sent to the Anthropic API. Embeddings are computed
-locally. The dashboard is LAN-only, with no port forwarding.
+Everything stays on the server except the prompts sent to the Anthropic API and web searches made
+through it. Embeddings are computed locally. The dashboard is LAN-only, with no port forwarding.
+Tykee doesn't use the Google Maps or Places API: place info comes from pasted links, chat and web
+search, and home addresses are never stored.
