@@ -17,7 +17,7 @@ from app.decisions import categories as cats
 from app.decisions import engine, feedback
 from app.decisions.categories import Category, ResolveResult
 from app.decisions.engine import PickRequest, PickResult
-from app.decisions.feedback import Action, FeedbackResult
+from app.decisions.feedback import Action, FeedbackResult, place_option
 from app.settings import SettingsStore
 from app.timeutil import from_sql, local_day_start, to_sql, utcnow
 
@@ -279,7 +279,7 @@ class DecisionService:
 
         def _ins(c: sqlite3.Connection) -> int:
             option_id = (
-                _place_option(c, category.id, choice, place_id)
+                place_option(c, category.id, choice, place_id)
                 if place_id is not None
                 else _option_by_name(c, category.id, choice)
             )
@@ -331,7 +331,7 @@ class DecisionService:
             if dup is not None:
                 return Recorded(int(dup[0]), created=False)
             option_id = (
-                _place_option(c, category.id, choice, place_id)
+                place_option(c, category.id, choice, place_id)
                 if place_id is not None
                 else _option_by_name(c, category.id, choice)
             )
@@ -361,26 +361,3 @@ def _option_by_name(c: sqlite3.Connection, category_id: int, name: str) -> int |
         (category_id, name),
     ).fetchone()
     return int(row[0]) if row else None
-
-
-def _place_option(c: sqlite3.Connection, category_id: int, name: str, place_id: int) -> int:
-    """The category's option for a place (§10.5): by place, else by name (linking it), else a
-    new option tagged ``place``."""
-    row = c.execute(
-        "SELECT id FROM options WHERE category_id = ? AND place_id = ?", (category_id, place_id)
-    ).fetchone()
-    if row is not None:
-        return int(row[0])
-    by_name = _option_by_name(c, category_id, name)
-    if by_name is not None:
-        c.execute(
-            "UPDATE options SET place_id = COALESCE(place_id, ?) WHERE id = ?",
-            (place_id, by_name),
-        )
-        return by_name
-    cur = c.execute(
-        "INSERT INTO options(category_id, name, tags_json, created_by, place_id) "
-        "VALUES (?, ?, ?, 'bot', ?)",
-        (category_id, name, json.dumps(["place"]), place_id),
-    )
-    return int(cur.lastrowid or 0)
