@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **Status** | Draft v1.13 (M2b ambient details: stage-1 order, cues in code, summaries) |
+| **Status** | Draft v1.14 (topics: read all, answer only in a dashboard-selected topic; memory harvester, §10.4) |
 | **Name** | Tykee: phonetic spelling of Tyche, the Greek goddess of chance. Telegram handle e.g. `@TykeeBot` (must end in "bot") |
 | **Author** | Jack |
 | **Date** | 2026-10-01 |
@@ -284,7 +284,7 @@ CREATE TABLE memory_inbox (
 CREATE TABLE usage (
   id                 INTEGER PRIMARY KEY,
   user_id            INTEGER REFERENCES users(id),
-  purpose            TEXT NOT NULL,               -- 'chat'|'judge'|'summary'|'import_extract'|'import_consolidate'
+  purpose            TEXT NOT NULL,               -- 'chat'|'judge'|'summary'|'harvest'|'import_extract'|'import_consolidate'
   chat_id            INTEGER,
   import_job_id      INTEGER REFERENCES import_jobs(id),
   model              TEXT NOT NULL,
@@ -713,7 +713,7 @@ User taps ✅ → callback → status='accepted', pref update, log note appended
   Claude can override the default `for_users` when context is clear; the default only applies when ambiguous.
 - **Formatting:** `parse_mode=HTML`. Claude writes plain text with a minimal markdown subset (`**bold**`, `_italic_`, `[text](url)`); code escapes `<`, `>`, `&`, converts that subset to HTML and splits at 4096 chars on the plain text first, so tags are always balanced. Claude never emits HTML.
 - **Single poller:** exactly one replica; a second instance causes `409 Conflict` from `getUpdates`. Compose `deploy.replicas` not used; documented in runbook.
-- **Commands:** `/pick <category>`, `/options <category>`, `/remember <text>`, `/forget <text>`, `/think <question>`, `/quiet [duration]`, `/unquiet`, `/settopic` (admin, M4, §10.4), `/help`.
+- **Commands:** `/pick <category>`, `/options <category>`, `/remember <text>`, `/forget <text>`, `/think <question>`, `/quiet [duration]`, `/unquiet`, `/settopic` (admin, M4: make this topic the answer topic, §10.4), `/help`.
 
 ### 10.1 Seeing all group messages
 
@@ -776,41 +776,111 @@ A nudge means the bot **starts** a conversation without anyone asking, on a sche
 - Configured in dashboard: time, days, category, target chat.
 - Skipped automatically if a decision for that category was already made today, or the group is muted.
 - Off by default, since the group is meant to be used on demand.
-- When a topic is configured (§10.4), nudges are posted into that topic (`message_thread_id` set explicitly).
+- When an answer topic is configured (§10.4), nudges are posted into that topic (`message_thread_id` set explicitly).
 
-### 10.4 Forum topic restriction: #Tykee only (M4)
+### 10.4 Forum topics: read everywhere, answer in one topic (M4)
 
-The group has **Topics** enabled. Tykee should only read and act in the dedicated **#Tykee** topic. Telegram has no per-topic permission for bots (member permissions are group-wide, and as a group admin the bot receives updates from every topic), so the restriction is enforced in Tykee's code.
+The group has **Topics** enabled. Tykee **reads and learns from every topic**, but only **speaks in one answer topic** (initially **#Tykee**), which the admin can change from the dashboard at any time. Telegram has no per-topic bot permission (member permissions are group-wide, and as a group admin the bot receives updates from every topic), so this split is enforced in Tykee's code.
 
-**How Telegram identifies topics:** in a forum supergroup, messages in a topic carry `message_thread_id` (the topic's id) and `is_topic_message = true`. Messages in the built-in **General** topic may arrive without a `message_thread_id`. Using a dedicated #Tykee topic avoids that ambiguity.
+**How Telegram identifies topics:** in a forum supergroup, messages in a topic carry `message_thread_id` (the topic's id) and `is_topic_message = true`. Messages in the built-in **General** topic may arrive without a `message_thread_id`; Tykee stores those as `thread_id = 1` (General's id) so they still belong to a topic. Using a dedicated #Tykee topic as the answer topic avoids that ambiguity.
 
-**Setting:** `telegram.group_topic_id` in `settings` (integer, nullable; editable in the dashboard). Optional env `GROUP_TOPIC_ID` seeds it on first run.
+#### Read vs. answer
 
-| `group_topic_id` | Behaviour in the allowed group |
-|---|---|
-| unset (NULL) | Pre-M4 behaviour: all group messages handled. Dashboard shows a warning tile: "Topic not set, Tykee is reading every topic". |
-| set | **Topic gate:** only messages whose `message_thread_id == group_topic_id` pass. |
+| | Answer topic (#Tykee) | Other topics | Ignored topics (optional) |
+|---|---|---|---|
+| Persisted to `messages` (with `thread_id`) | Yes | Yes | **No** (dropped at the gate) |
+| Speak-or-stay-silent judge (§10.2) | **Yes**, only here | No | No |
+| Tykee replies / decision keyboards / nudges | **Yes**, only here | Never (see off-topic mentions) | Never |
+| Builds memory | Yes, via the orchestrator's own `propose_memory` / `write_note` (§6.7) | Yes, via the **memory harvester** below | No |
+| Observed decisions feed recency (§8.3) | Yes (live decisions) | Yes, via the harvester | No |
 
-**Topic gate (runs immediately after the allowlist/allowed-group check, before anything else):**
-- Messages, edits, reactions and callback queries from other topics (or with no `message_thread_id`) are **dropped**: not persisted to `messages`, not counted for debounce, not sent to Claude, no memory proposals. Only a debug-level counter is kept.
-- Commands and @mentions in other topics are handled per `telegram.off_topic_mention` (default **`ignore`**, most private). Alternative `redirect`: reply once with "I only hang out in #Tykee 👋", rate-limited to once per topic per day.
+- **Off-topic commands and @mentions** are handled per `telegram.off_topic_mention`: default **`ignore`**, or `redirect` = reply once with "Ask me in #Tykee 👋", rate-limited to once per topic per day.
 - DMs are unaffected.
 
-**Sending into the topic:** every outbound group message (replies, decision keyboards, ambient interjections, scheduled nudges, budget/admin notices) is sent with `message_thread_id = group_topic_id`. Replies via aiogram `message.answer()` already inherit the thread; anything sent from the scheduler or orchestrator without an incoming message must set it explicitly. A single `send_to_group()` helper owns this so nothing slips into General.
+#### Settings (all dashboard-editable, Users → Telegram)
 
-**Setup (`/settopic`):**
-1. Create the **#Tykee** topic in the group.
-2. The admin sends `/settopic` *inside* #Tykee. Tykee stores that message's `message_thread_id` as `telegram.group_topic_id` and confirms in the topic.
-3. Only the admin (first user in `ALLOWED_TELEGRAM_IDS`) can run it; anyone else is ignored. The dashboard (Users → Telegram) shows the current topic id and lets the admin clear it.
+| Key | Default | Purpose |
+|---|---|---|
+| `telegram.answer_topic_id` | NULL | The only topic Tykee may speak in. NULL = pre-M4 behaviour (speaks anywhere in the group), shown as a warning tile. Optional env `GROUP_TOPIC_ID` seeds it on first run. |
+| `telegram.ignored_topic_ids` | `[]` | Topics Tykee must not read at all (e.g. a private topic). Dropped at the gate: never stored, never sent to Claude. |
+| `telegram.off_topic_mention` | `ignore` | `ignore` \| `redirect`. |
+| `harvest.enabled` | `true` | Memory harvester on/off. |
+| `harvest.interval_min` | 30 | How often the harvester runs. |
+| `harvest.min_new_messages` | 5 | Skip a topic until it has this many new messages (or the oldest unharvested one is > 6 h old). |
 
-**Edge cases**
-- **Topic deleted or closed:** a send failing with a thread-not-found error clears nothing automatically; it logs an error, raises a red health tile, and DMs the admin to run `/settopic` again.
-- **Topics turned off for the group:** `message_thread_id` disappears from messages, so the gate drops everything. The health tile flags "no messages in topic for 24 h while group is active" as a hint.
-- **Group → supergroup migration:** the topic id is kept; only the chat id changes (§10).
+**Changing the answer topic from the dashboard:** Users → Telegram shows a **dropdown of known topics** (name, message count, last activity) and the current answer topic. Selecting a new one takes effect immediately (settings are hot-reloaded); Tykee posts a one-line "I'll hang out here now 👋" in the new topic. `/settopic` sent by the admin inside a topic does the same from Telegram. Only the admin (first user in `ALLOWED_TELEGRAM_IDS`) can change it.
 
-**Data model:** add `thread_id INTEGER` to `messages` (new migration in M4; NULL for DMs). Group history stored before M4 has no topic info. M4 ships a one-time dashboard action, **"Purge pre-topic group history"**, that deletes group rows with `thread_id IS NULL` (and their rolling summary), so conversations from other topics captured during development don't linger.
+**Learning topic names:** a `forum_topics` table is filled from `forum_topic_created` / `forum_topic_edited` / `forum_topic_closed` / `forum_topic_reopened` service messages, and from the topic-creation message that topic messages reference via `reply_to_message` where Telegram includes it. Topics whose name is unknown are shown as "Topic <id>" until a name is seen; the admin can label them in the dashboard.
 
-**Ambient (§10.2) interaction:** debounce, judge windows, cooldowns and daily caps only ever see #Tykee messages, because everything else is dropped at the gate.
+#### Gate order (per update)
+
+1. Allowlist + allowed group (§10).
+2. `thread_id` in `ignored_topic_ids` → drop.
+3. Persist message with `thread_id`.
+4. `thread_id == answer_topic_id` (or `answer_topic_id` is NULL) → normal flow: commands, mentions, debounce + judge (§10.2).
+5. Otherwise → stop (no judge, no reply), except the off-topic mention handling above. The message waits for the harvester.
+
+#### Sending
+
+Every outbound group message (replies, decision keyboards, ambient interjections, scheduled nudges, budget/admin notices) goes through one `send_to_group()` helper that sets `message_thread_id = answer_topic_id`. Replies via aiogram `message.answer()` already inherit the thread, but anything from the scheduler/orchestrator without an incoming message must use the helper, so nothing slips into General.
+
+#### Memory harvester (other topics → second brain)
+
+Messages in non-answer topics never trigger a Claude call in real time. Instead a scheduled job turns them into memory in small batches:
+
+```
+every harvest.interval_min (scheduler):
+  for each topic ≠ answer topic with unharvested messages (cursor in topic_harvest):
+    skip if < min_new_messages and oldest unharvested < 6 h
+    window the new messages (same windowing as import §15.3, plus ~10 messages of prior context)
+    one Haiku-tier call (models.harvest, purpose='harvest'), same JSON schema as import extraction:
+      facts     → propose_memory (inbox; auto_approve respected), source: topic:<name>/msg:<id>
+      decisions → recorded as decisions(source='observed', status='accepted') when they map to an
+                  EXISTING category/alias; unknown categories are not created (avoids sprawl) and are
+                  shown as suggestions in the inbox instead
+      options   → suggestions in the inbox (not added automatically)
+    advance cursor
+```
+
+- Uses the same **topic allowlist** as the import (§15.4): food & drink, places, entertainment, activities, shopping preferences, routines, dietary restrictions/allergies. Health beyond diet, finances, work and relationship/intimate content are never extracted.
+- Pre-M4 group rows (no `thread_id`) are treated as one "unknown topic" and harvested once like any other.
+- Cost: Haiku-tier, a handful of calls per day for a couple's group, so cents. Counted in `usage` and budget caps; when the budget hits 80%, the harvester pauses before anything user-facing degrades.
+- The dashboard Ambient page shows harvester runs (topic, messages processed, items proposed).
+
+#### Data model (M4 migration)
+
+```sql
+ALTER TABLE messages ADD COLUMN thread_id INTEGER;   -- NULL for DMs and pre-M4 rows
+CREATE INDEX ix_messages_chat_thread ON messages(chat_id, thread_id, id);
+
+CREATE TABLE forum_topics (
+  chat_id       INTEGER NOT NULL,
+  thread_id     INTEGER NOT NULL,
+  name          TEXT,                    -- NULL until seen; admin can label
+  closed        INTEGER NOT NULL DEFAULT 0,
+  last_seen_at  TEXT,
+  PRIMARY KEY (chat_id, thread_id)
+);
+
+CREATE TABLE topic_harvest (
+  chat_id         INTEGER NOT NULL,
+  thread_id       INTEGER NOT NULL,      -- 0 = pre-M4 'unknown topic'
+  last_msg_id     INTEGER NOT NULL,      -- messages.id cursor
+  last_run_at     TEXT,
+  PRIMARY KEY (chat_id, thread_id)
+);
+-- usage.purpose gains 'harvest'; decisions.source gains 'observed'
+```
+
+Conversation history for replies (§7.2) is per `(chat_id, answer topic)`: Tykee's prompt contains the #Tykee conversation, not the other topics' chatter. What it learned elsewhere reaches it through the second brain (retrieval + pinned notes) and observed decisions.
+
+#### Edge cases
+
+- **Answer topic deleted/closed:** a send failing with a thread error raises a red health tile and DMs the admin to pick a new topic in the dashboard or via `/settopic`. Reading/harvesting continues.
+- **Topics disabled for the group:** `message_thread_id` disappears, so everything lands in General (`thread_id = 1`). The health tile warns when the answer topic has been silent for 24 h while the group is active.
+- **Group → supergroup migration:** topic ids are kept; only the chat id changes (§10).
+
+**Ambient (§10.2) interaction:** debounce windows, judge calls, cooldowns and daily caps are computed over answer-topic messages only.
 
 ---
 
@@ -827,7 +897,7 @@ LAN-only at `http://<nas>:8080`. Single admin password (argon2 hash in env), sig
 | **Import** | Telegram export upload wizard: validate, choose chats/date range, map senders, cost estimate + consent, progress/cancel, review with evidence, apply (§15.2). |
 | **Ambient** | Speak-or-silent settings (debounce, threshold, cooldown, daily cap, judge prompt), `ambient_log` timeline with reasons and feedback, mute status, scheduled nudges. |
 | **Conversations** | Per-chat transcript including tool calls (debugging). |
-| **Users** | Names, Telegram IDs, timezone, nudge schedule. **Telegram (M4):** allowed group id, current #Tykee topic id (clear/reset), off-topic mention mode (`ignore`/`redirect`), "Purge pre-topic group history" action (§10.4). |
+| **Users** | Names, Telegram IDs, timezone, nudge schedule. **Telegram (M4, §10.4):** allowed group id; **answer topic dropdown** (known topics with names, message counts, last activity; change takes effect immediately); ignored topics; off-topic mention mode (`ignore`/`redirect`); label unnamed topics. |
 | **System** | Reindex vault, run backup now, download backup, view logs tail. |
 
 All settings are read from SQLite on each request, so changes apply instantly with no restart.
@@ -844,7 +914,7 @@ All settings are read from SQLite on each request, so changes apply instantly wi
 | Prompt injection via notes / user text | Tools are narrow; `write_note` path-restricted to vault folders; pinned notes immutable implicitly; no shell tools. The only network access is Anthropic's server-side web search/fetch (M7). |
 | Prompt injection / bad data via web content (M7) | Web results treated as untrusted data; web-sourced memories always require human approval in the inbox; web tools only on the orchestrator call; optional domain allow/block lists; daily search cap (§7.5). |
 | Path traversal in note paths | Resolve and enforce `vault_root in path.parents`; reject symlinks. |
-| Bot reads all group messages | Only the configured group, and from M4 only the #Tykee topic (§10.4); only allowlisted senders persisted. Messages are sent to Anthropic only when the judge or orchestrator runs (a recent window, not the full history). Both users know the bot is listening (stated on join). |
+| Bot reads all group messages | Only the configured group and allowlisted senders are persisted; topics in `telegram.ignored_topic_ids` are dropped unread. Other topics are read and stored with `thread_id` and sent to Anthropic only in harvester batches (Haiku-tier, topic allowlist, §10.4); Tykee speaks only in the answer topic. Both users know the bot is listening (stated on join). |
 | Cross-user leakage (in chat) | Owner filter in retrieval and pinned injection; one user's private memories only enter the other's chat when `for_users=both`, and then only constraint-type notes. **Accepted:** facts learned in a DM (`memories/<slug>/`) can surface in group answers, since the group defaults to `for_users=both`. No per-note `private` flag. |
 | Admin visibility | **Decided:** admin (Jack) can see all conversations and all memories, including the partner's, in the dashboard. The bot states this once to each user on first contact (`/start`) so it is transparent. |
 | Data sent to Anthropic | Only the assembled prompt; documented to both users. API data is not used for training by default per Anthropic's commercial terms (verify current terms). |
@@ -1055,7 +1125,7 @@ Both people's raw messages are sent to the Anthropic API during extraction, so b
 | M2 | Decision engine: dynamic categories + resolver (§8.1), options, `random_pick`, inline buttons, feedback learning, fallback | "Dinner?" and "what movie?" each create/resolve a category and return a weighted, non-repeating pick. |
 | M2b | Ambient participation: debounce, stage-1 rules, judge call, cooldown/caps, `/quiet`, `ambient_log`, rolling chat summaries | Bot steps in on "idk you decide" and stays silent through small talk. |
 | M3 | Second brain: NoteStore, chunking, `Embedder` (fastembed, model baked into image, int8 vs fp32 eval per §6.9), FTS5 + sqlite-vec, hybrid retrieval, pinned notes, memory tools, inbox, decision log mirror | "Remember I hate coriander" changes future picks. |
-| M4 | Dashboard: auth, all pages in §11 (incl. category merge), usage & budget UI (enforcement itself lands in M1); **forum topic restriction to #Tykee (§10.4)**: topic gate, `/settopic`, `send_to_group()` helper with `message_thread_id`, `messages.thread_id` migration, pre-topic history purge | All behaviour controllable without touching code. Tykee only reads and replies in #Tykee; messages in other topics are never stored or sent to Claude. |
+| M4 | Dashboard: auth, all pages in §11 (incl. category merge), usage & budget UI (enforcement itself lands in M1); **forum topics (§10.4)**: read all topics with `thread_id`, answer only in the dashboard-selected answer topic (dropdown + `/settopic`), ignored-topic list, `forum_topics` name tracking, `send_to_group()` helper, off-topic mention handling, **memory harvester** for other topics | All behaviour controllable without touching code. Tykee learns from every topic but only speaks in the answer topic; switching the answer topic in the dashboard takes effect immediately; a preference mentioned in another topic shows up in the memory inbox. |
 | M5 | Bootstrap import: dashboard upload wizard (§15.2), Telegram JSON/zip parser (single chat + full account), windowing, batch extraction, consolidation, review UI, apply | 6 months of history reviewed and applied; bot knows both users on day one. |
 | M6 | Scheduled nudges (optional), backups, healthcheck, polish, runbook | Runs unattended for 2 weeks. |
 | M7 | Web access (§7.5): web search + fetch server tools on the orchestrator call, `web.*` settings + dashboard toggles, persona rules, web-sourced memory → inbox only, usage/cost recording of searches & fetches, daily cap + budget-based disable, error fallback | "Is that new ramen place in Tanjong Pagar any good?" gets a short, cited answer; a web fact never lands in the vault without approval; tests pass offline with web tools faked. |
@@ -1082,5 +1152,5 @@ Deferred / later: voice notes (requires separate STT), photo input (fridge conte
 | Web access | Agent with Anthropic server-side web search/fetch, orchestrator only, capped, web-sourced memories need approval. Milestone M7, see §7.5. |
 | Import source | Telegram Desktop JSON export, uploaded via the dashboard Import wizard; chats chosen at upload time, see §15.1–15.2. |
 | Group behaviour | Group is primary; bot reads everything and decides when to speak, silent by default, see §10.2. |
-| Group topic | Tykee only operates in the dedicated **#Tykee** forum topic, enforced in code (Telegram has no per-topic bot permission). Milestone M4, see §10.4. |
+| Group topics | Tykee reads and builds memory from **all** topics (except an optional ignore list) but only speaks in one **answer topic** (initially #Tykee), changeable from the dashboard. Enforced in code; milestone M4, see §10.4. |
 | Scheduled nudges | Supported but off by default, see §10.3. |
