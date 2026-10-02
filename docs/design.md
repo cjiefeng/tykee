@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **Status** | Draft v1.19 (M4 topics: sending to General, /settopic anywhere, harvest_runs) |
+| **Status** | Draft v1.20 (M4 harvester details: inbox suggestion kinds, per-window cursor) |
 | **Name** | Tykee: phonetic spelling of Tyche, the Greek goddess of chance. Telegram handle e.g. `@TykeeBot` (must end in "bot") |
 | **Author** | Jack |
 | **Date** | 2026-10-01 |
@@ -279,6 +279,8 @@ CREATE TABLE memory_inbox (
   source      TEXT,                              -- provenance: telegram:<chat>, web:<url> (M7), topic:<name> (M4)  (0004)
   decided_at  TEXT,                              -- (0004)
   decided_by  INTEGER REFERENCES users(id),      -- NULL when auto-approved (0004)
+  kind        TEXT NOT NULL DEFAULT 'note',      -- 'note' | 'category' | 'option' (0006, harvester suggestions)
+  payload_json TEXT                              -- kind-specific: {phrase, aliases, description} | {category_id, name, tags}
   status      TEXT NOT NULL DEFAULT 'pending',   -- 'pending'|'approved'|'rejected'
   created_at  TEXT NOT NULL DEFAULT (datetime('now'))
 );
@@ -827,7 +829,10 @@ The group has **Topics** enabled. Tykee **reads and learns from every topic**, b
 | `telegram.off_topic_mention` | `ignore` | `ignore` \| `redirect`. |
 | `harvest.enabled` | `true` | Memory harvester on/off. |
 | `harvest.interval_min` | 30 | How often the harvester runs. |
-| `harvest.min_new_messages` | 5 | Skip a topic until it has this many new messages (or the oldest unharvested one is > 6 h old). |
+| `harvest.min_new_messages` | 5 | Skip a topic until it has this many new messages (or the oldest unharvested one is older than `harvest.max_age_hours`, default 6). |
+| `harvest.context_messages` | 10 | Prior messages included above the `--- new ---` line. |
+| `models.harvest` | Haiku-tier | Model for stage 2 (falls back to `models.judge`). |
+| `budget.warn_ratio` | 0.8 | The 80% level: dashboard warning, and the harvester pauses. |
 
 **Changing the answer topic from the dashboard:** Users → Telegram shows a **dropdown of known topics** (name, message count, last activity) and the current answer topic. Selecting a new one takes effect immediately (settings are hot-reloaded); Tykee posts a one-line "I'll hang out here now 👋" in the new topic. `/settopic` sent by the admin inside a topic does the same from Telegram. Only the admin (first user in `ALLOWED_TELEGRAM_IDS`) can change it.
 
@@ -888,6 +893,13 @@ for each qualifying topic:
       options   → suggestions in the inbox (not added automatically)
     advance cursor
 ```
+
+**Implementation notes (M4):**
+- The scheduler fires every minute; the tick only does work once `harvest.interval_min` has passed, so changing the interval takes effect without a restart. The dashboard can force a tick.
+- No answer topic set → nothing is harvested (every topic is answered live then).
+- The cursor advances after each successfully applied window, so a failure (LLM down, invalid output, budget) is retried later without re-proposing what already landed. Each topic harvest writes a `harvest_runs` row (`done` / `error` / `budget`).
+- Facts below confidence 0.6, and facts whose owner isn't a user slug or `shared` (third parties), are dropped. A fact lands in `memories/<owner>/{preferences|places|facts|constraints}.md` (or `shared/topics/…`) once approved.
+- Chosen episodes whose category phrase (or any phrase seen) resolves by alias/slug become `decisions(source='observed', status='accepted')`, matched to an existing option by name. Unknown categories become **inbox suggestions** (`kind='category'`; approving creates the category with those phrasings as aliases). New options with non-negative sentiment in known categories become `kind='option'` suggestions (approving adds the option). Suggestions show in `/inbox` and the dashboard inbox.
 
 - Uses the same **topic allowlist** as the import (§15.4): food & drink, places, entertainment, activities, shopping preferences, routines, dietary restrictions/allergies. Health beyond diet, finances, work and relationship/intimate content are never extracted.
 - Pre-M4 group rows (no `thread_id`) are treated as one "unknown topic" and harvested once like any other.

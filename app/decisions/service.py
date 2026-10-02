@@ -226,3 +226,42 @@ class DecisionService:
             ).fetchone()
         )
         return (row[0], row[1], row[2]) if row else None
+
+    async def get_category(self, category_id: int) -> Category | None:
+        return await self._db.read(lambda c: cats.get_by_id(c, category_id))
+
+    async def record_observed(
+        self,
+        category: Category,
+        *,
+        choice: str,
+        for_users: str,
+        at: datetime,
+        chat_id: int | None,
+    ) -> int:
+        """A choice seen in another topic (§10.4): stored as accepted so it feeds recency, with
+        ``source='observed'``. Matches an existing option by name when there is one."""
+        asked_by = next(iter(self._users_by_slug.values()))
+
+        def _ins(c: sqlite3.Connection) -> int:
+            row = c.execute(
+                "SELECT id FROM options WHERE category_id = ? AND lower(name) = lower(?)",
+                (category.id, choice),
+            ).fetchone()
+            cur = c.execute(
+                "INSERT INTO decisions(category_id, option_id, choice_text, for_users, asked_by, "
+                "status, source, chat_id, created_at) VALUES (?, ?, ?, ?, ?, 'accepted', "
+                "'observed', ?, ?)",
+                (
+                    category.id,
+                    row[0] if row else None,
+                    choice,
+                    for_users,
+                    asked_by,
+                    chat_id,
+                    to_sql(at),
+                ),
+            )
+            return int(cur.lastrowid or 0)
+
+        return await self._db.write(_ins)

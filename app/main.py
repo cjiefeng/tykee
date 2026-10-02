@@ -15,6 +15,7 @@ from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.exceptions import TelegramUnauthorizedError
 
+from app import inbox_appliers
 from app.ambient.judge import Judge
 from app.ambient.service import AmbientService
 from app.brain.embedder import FastEmbedder, cache_dir_for
@@ -26,11 +27,13 @@ from app.db.database import Database
 from app.db.migrate import apply_migrations
 from app.db.repos.users import UserRecord, load_enabled, upsert_allowlist
 from app.decisions.service import DecisionService
+from app.harvest import Harvester
 from app.health import HealthState
 from app.llm.client import AnthropicLLMClient
 from app.logging import setup_logging
 from app.orchestrator.orchestrator import Orchestrator
 from app.orchestrator.summary import Summarizer
+from app.scheduler import Scheduler
 from app.settings import SettingsStore, seed_settings
 from app.telegram.adapter import TelegramAdapter
 from app.telegram.addressing import BotIdentity
@@ -132,6 +135,7 @@ async def run(env: Env) -> None:
         health = HealthState()
         registry = GroupRegistry(db, group_id)
         topics = TopicService(db=db, settings=settings, group_id=lambda: registry.group_id)
+        inbox_appliers.register(memory, decisions)
         summarizer = Summarizer(
             db=db,
             settings=settings,
@@ -179,10 +183,26 @@ async def run(env: Env) -> None:
             AccessGate(users=users, registry=registry, gateway=gateway, health=health)
         )
         dp.include_router(adapter.router())
+        harvester = Harvester(
+            db=db,
+            settings=settings,
+            llm=llm,
+            memory=memory,
+            decisions=decisions,
+            topics=topics,
+            users=users,
+            tz=tz,
+            group_id=lambda: registry.group_id,
+            health=health,
+        )
+        scheduler = Scheduler(tz)
+        scheduler.every_minute("harvest", harvester.tick)
+        scheduler.start()
         log.info("polling", extra={"bot": me.username})
         try:
             await dp.start_polling(bot, allowed_updates=ALLOWED_UPDATES)
         finally:
+            scheduler.shutdown()
             await ambient.close()
             await summarizer.close()
             embedder.close()

@@ -420,7 +420,12 @@ class TelegramAdapter:
             return
         total = await self._memory.pending_count()
         for item in items:
-            text = f"📥 **{item.owner}** → {item.target_path}\n{item.content}"
+            if item.kind == "category":
+                text = f"🗂 **Suggestion:** {item.content}"
+            elif item.kind == "option":
+                text = f"➕ **Suggestion:** {item.content}"  # noqa: RUF001
+            else:
+                text = f"📥 **{item.owner}** → {item.target_path}\n{item.content}"
             if item.reason:
                 text += f"\n_why: {item.reason}_"
             await self._gateway.send_text(

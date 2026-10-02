@@ -68,10 +68,10 @@ def recent(
         f"{clause}ORDER BY id DESC LIMIT ?",
         (chat_id, *args, limit),
     ).fetchall()
-    return [_row(r) for r in reversed(rows)]
+    return [from_row(r) for r in reversed(rows)]
 
 
-def _row(r: sqlite3.Row) -> StoredMessage:
+def from_row(r: sqlite3.Row) -> StoredMessage:
     return StoredMessage(
         id=r["id"],
         chat_id=r["chat_id"],
@@ -95,4 +95,4 @@ def after(
         f"{clause}ORDER BY id",
         (chat_id, after_id, *args),
     ).fetchall()
-    return [_row(r) for r in rows]
+    return [from_row(r) for r in rows]

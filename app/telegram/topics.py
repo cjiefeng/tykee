@@ -130,9 +130,15 @@ class TopicService:
                 "VALUES (?, ?, ?, COALESCE(?, 0), ?) ON CONFLICT(chat_id, thread_id) DO UPDATE SET "
                 "name = COALESCE(excluded.name, forum_topics.name), "
                 "closed = COALESCE(?, forum_topics.closed), last_seen_at = excluded.last_seen_at",
-                (chat_id, thread_id, name, None if closed is None else int(closed), now,
-                 None if closed is None else int(closed)),
-            )  # fmt: skip
+                (
+                    chat_id,
+                    thread_id,
+                    name,
+                    None if closed is None else int(closed),
+                    now,
+                    None if closed is None else int(closed),
+                ),
+            )
 
         await self._db.write(_up)
 

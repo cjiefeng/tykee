@@ -30,7 +30,7 @@ from app.timeutil import local_day_start, local_month_start, to_sql, utcnow
 
 log = logging.getLogger(__name__)
 
-Purpose = Literal["chat", "judge", "summary", "import_extract", "import_consolidate"]
+Purpose = Literal["chat", "judge", "summary", "import_extract", "import_consolidate", "harvest"]
 
 INTERACTIVE_TIMEOUT_S = 30.0
 CONSOLIDATION_TIMEOUT_S = 120.0

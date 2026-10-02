@@ -6,6 +6,7 @@ requires-python = ">=3.12,<3.13"
 dependencies = [
   "aiogram>=3.13,<4",
   "anthropic>=1.11,<2",
+  "apscheduler>=3.10,<4",
   "fastembed>=0.8,<0.9",
   "numpy>=2",
   "python-frontmatter>=1.1",
@@ -47,7 +48,7 @@ files = ["app"]
 plugins = ["pydantic.mypy"]
 
 [[tool.mypy.overrides]]
-module = ["sqlite_vec", "frontmatter", "fastembed", "fastembed.*"]
+module = ["sqlite_vec", "frontmatter", "fastembed", "fastembed.*", "apscheduler.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]
