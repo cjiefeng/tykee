@@ -42,8 +42,11 @@ def insert(conn: sqlite3.Connection, row: UsageRow) -> None:
     )
 
 
-def cost_since(conn: sqlite3.Connection, since_sql: str) -> float:
+def cost_since(conn: sqlite3.Connection, since_sql: str, *, include_import: bool = True) -> float:
+    """Spend since a time. ``include_import=False`` leaves out the bootstrap import, which only
+    counts against the monthly cap (§13)."""
+    extra = "" if include_import else " AND import_job_id IS NULL"
     (total,) = conn.execute(
-        "SELECT COALESCE(SUM(cost_usd), 0) FROM usage WHERE created_at >= ?", (since_sql,)
+        f"SELECT COALESCE(SUM(cost_usd), 0) FROM usage WHERE created_at >= ?{extra}", (since_sql,)
     ).fetchone()
     return float(total)

@@ -36,5 +36,7 @@
   "harvest.min_new_messages": 5,
   "harvest.max_age_hours": 6,
   "harvest.context_messages": 10,
-  "budget.warn_ratio": 0.8
+  "budget.warn_ratio": 0.8,
+  "import.max_upload_mb": 200,
+  "import.poll_min": 5
 }
