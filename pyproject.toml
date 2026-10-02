@@ -64,3 +64,6 @@ testpaths = ["tests"]
 pythonpath = ["."]
 markers = ["integration: hits real external APIs; opt-in via `-m integration`"]
 addopts = "-m 'not integration'"
+# Build a record for every log call: a bad `extra=` key only raises when a record is made, and
+# at the default WARNING level INFO calls never make one (that hid a crash until production).
+log_level = "DEBUG"

@@ -131,7 +131,7 @@ async def run(env: Env) -> None:
         store = NoteStore(root=env.data_dir / "vault", db=db, embedder=embedder, tz=tz)
         created = await store.ensure_skeleton(users)
         stats = await store.reconcile()
-        log.info("vault ready", extra={"created": created, **stats})
+        log.info("vault ready", extra={"skeleton_created": created, **stats})
         memory = MemoryService(
             store=store,
             retriever=Retriever(db, embedder),
