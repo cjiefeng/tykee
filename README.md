@@ -9,6 +9,8 @@ chance.
   avoids suggesting the same thing three nights running. Randomness lives in code, never in the LLM.
 - **A "second brain"** of markdown notes with local hybrid search (keywords + embeddings) remembers
   both people's preferences, dislikes and allergies.
+- **Web search and fetch** (Claude's server-side tools) answer live questions like opening hours
+  or reviews, with short cited replies.
 - **A LAN-only admin dashboard** controls persona, models, options, memory and spend.
 
 It runs as one Python 3.12 asyncio process with SQLite, in a single Docker container on a home server
@@ -20,6 +22,9 @@ It runs as one Python 3.12 asyncio process with SQLite, in a single Docker conta
 - **The shared group is the main interface.** Tykee reads every group message but stays silent by
   default. It always answers @mentions, replies and `/commands`, and steps in on its own only when
   a cheap judge call thinks it would help (e.g. "idk, you decide"). `/quiet` mutes it.
+- **Forum topics:** Tykee reads and learns from every topic (except an optional ignore list) but
+  only speaks in one answer topic, set with `/settopic` or from the dashboard. A background
+  harvester turns preferences mentioned in other topics into memory suggestions.
 - **Private DMs** work too, and always get a reply.
 - **Only allowlisted Telegram users** and the one configured group are served. Everything else is
   dropped before any processing or API call.
@@ -30,6 +35,14 @@ It runs as one Python 3.12 asyncio process with SQLite, in a single Docker conta
 - **Memory:** "remember I hate coriander" is written to the vault immediately. Facts Tykee infers
   on its own go to an inbox for approval. Pinned notes (like allergies) are always in context, so
   they never depend on search recall.
+- **Web lookups** happen only when the answer depends on live facts, capped per reply and per day,
+  and paused when spend nears the budget. Facts found on the web never go into memory without
+  approval.
+- **Bootstrap import:** upload a Telegram Desktop export in the dashboard and Tykee learns your
+  past decisions, categories and preferences from it. Health, money, work and relationship talk
+  is skipped.
+- **Scheduled nudges** (off by default) can post a pick at a set time, e.g. "Dinner? I'm thinking
+  Thai" on weekdays at 17:30. No Claude call needed.
 - **If Claude is unavailable** or the budget cap is reached, it falls back to a plain random pick.
 
 Commands: `/pick`, `/options`, `/remember`, `/forget`, `/think`, `/quiet`, `/unquiet`, `/inbox`,
@@ -38,7 +51,8 @@ Commands: `/pick`, `/options`, `/remember`, `/forget`, `/think`, `/quiet`, `/unq
 ## Architecture
 
 ```
-Telegram ◄─ long polling ─► Telegram adapter (aiogram) ─► Orchestrator ─► Claude API (tool loop)
+Telegram ◄─ long polling ─► Telegram adapter (aiogram) ─► Orchestrator ─► Claude API (tool loop,
+                                                                │           + web search/fetch)
                                                                 │
                                    ┌────────────────────────────┼──────────────────┐
                                    ▼                            ▼                  ▼
@@ -59,7 +73,8 @@ Browser (LAN) ◄─► Dashboard (FastAPI, :8081)
 | Storage | SQLite (WAL): one writer thread plus a read-only pool |
 | Embeddings | `fastembed` (ONNX, CPU) with `intfloat/multilingual-e5-small`, int8 weights, baked into the image (§6.9) |
 | Retrieval | FTS5 BM25 + vector KNN, fused with Reciprocal Rank Fusion, plus 1-hop wikilink expansion |
-| Dashboard | FastAPI + Jinja2 + HTMX, password login, LAN only |
+| Web | Claude API server tools (web search + fetch); no extra API key |
+| Dashboard | FastAPI + Jinja2 + HTMX, password login, LAN only (`http://<server>:8081`) |
 
 ## Getting started
 
@@ -81,8 +96,10 @@ cp .env.example .env
 | `ALLOWED_TELEGRAM_IDS` | `<id>:<slug>` pairs, comma-separated. The first entry is the admin. |
 | `GROUP_CHAT_ID` | The one group Tykee serves. Can be left empty at first (see step 4). |
 | `TZ` | Household timezone. Daily budgets and caps reset on its day boundaries. |
+| `GROUP_TOPIC_ID` | Optional. Seeds the forum topic Tykee answers in on first run. Easier: send `/settopic` in that topic as the admin. |
+| `LOG_LEVEL` | Default `INFO`. |
 | `TYKEE_DATA_DIR` | Host path mounted at `/data` (default `./data`). On the server, use a fast persistent volume. |
-| `DASHBOARD_PASSWORD_HASH`, `SESSION_SECRET` | Dashboard login (M4). Single-quote the argon2 hash, because compose interpolates `$`. |
+| `DASHBOARD_PASSWORD_HASH`, `SESSION_SECRET` | Dashboard login. Generate both with `docker compose run --rm tykee python -m app.dashboard.hashpw`. Single-quote the argon2 hash, because compose interpolates `$`. Without both, the dashboard stays off. |
 
 Never commit `.env` or the data directory.
 
@@ -108,6 +125,9 @@ For local development use `make up`, `make logs` and `make down`.
    `.env` and redeploy.
 
 Only one instance may run at a time. A second poller gets `409 Conflict` from Telegram.
+
+Backups (nightly SQLite copies plus a local git commit of the vault), restore, healthcheck and other
+operations are covered in the [runbook](docs/runbook.md).
 
 ## Development
 
@@ -144,6 +164,7 @@ loop, and update `docs/design.md` in the same commit as any behaviour change.
 | M5 ✅ | Bootstrap import from 6 months of Telegram chat history |
 | M6 ✅ | Scheduled nudges, backups, healthcheck, runbook |
 | M7 ✅ | Web search and fetch, with cited answers |
+| M8 🚧 | Google Maps links → places: resolve pasted links to a named shop (no API, no LLM), record "eating here" as a decision, never store home addresses |
 
 Details and acceptance criteria are in design §16.
 
