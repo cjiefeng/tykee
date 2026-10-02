@@ -17,6 +17,7 @@ from anthropic.types import (
     ToolResultBlockParam,
 )
 
+from app.brain.memory import MemoryService
 from app.db.database import Database
 from app.db.repos import messages as messages_repo
 from app.db.repos import summaries as summaries_repo
@@ -83,14 +84,16 @@ class Orchestrator:
         users: Sequence[UserRecord],
         tz: ZoneInfo,
         summarizer: Summarizer | None = None,
+        memory: MemoryService | None = None,
         clock: Callable[[], datetime] = utcnow,
     ) -> None:
         self._summarizer = summarizer
+        self._memory = memory
         self._db = db
         self._settings = settings
         self._llm = llm
         self._decisions = decisions
-        self._tools = ToolRouter(decisions)
+        self._tools = ToolRouter(decisions, memory)
         self._users = list(users)
         self._users_by_id = {u.id: u for u in users}
         self._tz = tz
@@ -132,7 +135,10 @@ class Orchestrator:
             actor=actor,
             default_for_users=default_for_users(chat, actor),
             tz=self._tz,
+            is_group=chat.is_group,
+            source=f"telegram:{chat.chat_id}",
         )
+        pinned = await self._memory.pinned_block() if self._memory is not None else None
         system = build_system(
             s.persona_system_prompt,
             dynamic_context(
@@ -143,6 +149,7 @@ class Orchestrator:
                 default_for_users=ctx.default_for_users,
                 unprompted_reason=unprompted_reason,
             ),
+            pinned=pinned,
         )
         try:
             resp = await self._loop(system, messages, ctx)

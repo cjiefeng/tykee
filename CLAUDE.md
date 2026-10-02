@@ -47,11 +47,20 @@ All tooling runs inside Docker (no local Python/uv needed).
 - `app/orchestrator/`: prompt assembly (§7.2), history replay, Claude tool loop (max 6
   iterations, then `tool_choice: none`), tool schemas + router in `tools.py`, fallback (§8.5),
   rolling chat summaries (`summary.py`, background, one run per chat at a time).
+- `app/brain/`: second brain (§6). `notes.py` (pure: paths, frontmatter, edit modes, chunking,
+  wikilinks), `store.py` (`NoteStore`: the only vault writer; atomic write → synchronous
+  reindex; `reconcile()` at startup), `index.py` (notes/chunks/FTS5/vec0/links rows),
+  `retrieval.py` (hybrid BM25 + KNN + RRF, owner-filtered), `embedder.py` (fastembed e5-small,
+  int8 by default, own thread), `memory.py` (`MemoryService`: scopes, write policy, inbox,
+  pinned block, avoid_tags, decision log). Vault lives at `/data/vault`.
 - `app/ambient/`: speak-or-stay-silent (§10.2). `rules.py` (pure stage-1), `debounce.py`
   (per-chat timers, in memory), `judge.py` (structured-output call), `state.py`
   (`chat_state`/`ambient_log`), `phrases.py` (mute/negative cues, `/quiet` durations),
   `service.py` (`AmbientService` ties it together; the adapter is its `responder`).
-- `tests/fakes/`: `FakeLLMClient` (scripted text / `tool_call(...)` / exceptions), `FakeGateway`.
+- `scripts/embedding_eval.py`: the §6.9 int8 vs fp32 eval (needs the real models; run in the dev
+  container with `uv run python -m scripts.embedding_eval all <cache dir>`).
+- `tests/fakes/`: `FakeLLMClient` (scripted text / `tool_call(...)` / exceptions), `FakeGateway`,
+  `FakeEmbedder` (hashed bag of words; unit tests never load the real model).
   `tests/conftest.py`: migrated temp DB (`env`), `make_stack()` wiring the whole bot with fakes,
   `seed_category()`. Ambient tests call `stack.ambient.fire(chat_id)` directly instead of
   waiting for the debounce; background tasks are closed via `env.closers`.
@@ -69,6 +78,9 @@ All tooling runs inside Docker (no local Python/uv needed).
   `app/telegram/formatting.py` escapes and converts. Never send unescaped model text as HTML.
 - History replay sends only user text and final assistant text; tool calls are stored for
   debugging, not replayed. Fallback replies are not stored in history.
+- Vault writes only through `NoteStore` (or `MemoryService` for Claude-facing policy). Never write
+  files under `/data/vault` directly; FTS5 deletes need the old text and vec0 rows aren't
+  cascaded, both handled in `brain/index.py`.
 - Randomness lives in code, never in the LLM (§8). Engine functions take an injectable
   `random.Random`; tests seed it and use the `Clock` from `tests/conftest.py`.
 - Tool inputs are validated with pydantic; bad input goes back to Claude as an `is_error`

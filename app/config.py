@@ -42,6 +42,7 @@ class Env(BaseSettings):
     allowed_telegram_ids: str
     group_chat_id: int | None = None  # see design §10: seeds the one allowed group
     data_dir: Path = Path("/data")
+    embed_baked_dir: Path = Path("/app/models")  # model files baked into the image at build
     log_level: str = "INFO"
     tz: str = "UTC"
 

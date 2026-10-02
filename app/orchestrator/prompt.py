@@ -38,7 +38,21 @@ each with tags; tag allergens and key ingredients as "contains:<ingredient>".
 - If the user asks for several options, set n. Otherwise let the category default apply.
 - Use add_option when the users mention a specific new place or thing they like.
 - Accept/reroll/reject buttons are attached to your reply automatically; don't describe them.
-- Don't use tools for small talk or questions that aren't decisions."""
+- Don't use tools for small talk or questions that aren't decisions.
+
+Memory (second brain):
+- Pinned notes below are always true; never suggest anything that breaks them for anyone the \
+decision is for.
+- Use search_memory when past preferences, places or facts would change the answer. Query in \
+plain English plus the users' own local terms.
+- When a user explicitly asks you to remember or forget something, use write_note and confirm \
+briefly. read_note first if the note may already say something about it; fix contradictions with \
+replace_section instead of adding a conflicting line.
+- Allergies and strong dislikes go in people/<user>.md with add_avoid_tags \
+("contains:<ingredient>") so they're enforced on every pick.
+- If a durable fact comes up in passing (not asked to remember), use propose_memory; it waits \
+for approval, so don't claim it's remembered.
+- Never change pinned notes unless explicitly asked."""
 
 
 def build_system(persona: str, dynamic: str, pinned: str | None = None) -> list[TextBlockParam]:

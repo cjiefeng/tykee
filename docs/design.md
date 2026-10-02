@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **Status** | Draft v1.16 (harvester: code-only 30-min tick, LLM only when new chat, §10.4) |
+| **Status** | Draft v1.17 (M3: int8 eval result, memory policies, inbox via /inbox, pinned scope) |
 | **Name** | Tykee: phonetic spelling of Tyche, the Greek goddess of chance. Telegram handle e.g. `@TykeeBot` (must end in "bot") |
 | **Author** | Jack |
 | **Date** | 2026-10-01 |
@@ -276,6 +276,9 @@ CREATE TABLE memory_inbox (
   target_path TEXT NOT NULL,
   content     TEXT NOT NULL,
   reason      TEXT,                              -- what in the chat triggered it
+  source      TEXT,                              -- provenance: telegram:<chat>, web:<url> (M7), topic:<name> (M4)  (0004)
+  decided_at  TEXT,                              -- (0004)
+  decided_by  INTEGER REFERENCES users(id),      -- NULL when auto-approved (0004)
   status      TEXT NOT NULL DEFAULT 'pending',   -- 'pending'|'approved'|'rejected'
   created_at  TEXT NOT NULL DEFAULT (datetime('now'))
 );
@@ -409,7 +412,9 @@ Jack likes spicy food but not numbing (mala) spice. See [[shared/topics/sichuan]
 2. Render frontmatter + body; write to `path.tmp`, `fsync`, `rename()` (atomic).
 3. Parse → chunk → diff `chunk_hash` against DB → embed only new/changed chunks (thread pool).
 4. In one SQLite transaction: upsert `notes`, replace `chunks`/`chunks_fts`/`chunks_vec`/`links` for that note.
-5. Mark the vault dirty for the nightly git commit.
+5. Mark the vault dirty for the nightly git commit (M6; until then the nightly job simply commits whatever changed).
+
+`write_note` modes: `create` (fails if the note exists), `append` (optionally under a heading, created as `##` if missing), `replace_section` (rewrite one section: contradictions), `replace` (rewrite the body, keeping the title: forgetting a line). A new note gets a ULID, owner and type from its path (`people/` → profile, `shared/places/` → place, otherwise fact), and a readable title from its filename unless one is given. Only notes under `people/<user>.md`, `memories/<user>/`, `shared/household.md`, `shared/places/` and `shared/topics/` are writable by Claude; `logs/` is internal.
 
 `logs/` is written through `NoteStore` but excluded from the index (steps 3–4 skipped), so decision logs never crowd out real memories in retrieval.
 
@@ -425,6 +430,7 @@ Jack likes spicy food but not numbing (mala) spice. See [[shared/topics/sichuan]
 
 ```
 input: query, asker, scope ('me'|'partner'|'both'|'shared'), k=6
+       scope 'partner' = every user except the asker; default scope: group → 'both', DM → 'me' 
 
 1. owner_filter = {asker_slug, 'shared'}          (+ partner's slug if scope == 'both')
 2. fts  = top 30 from chunks_fts MATCH query       → join chunks/notes, filter owner, rank by bm25
@@ -438,14 +444,18 @@ KNN over-fetches (30) and filters by owner afterwards; at this data size that's 
 
 ### 6.6 Pinned context
 
-Notes with `pinned: true` (people profiles, household constraints) are **always** injected into the system prompt for the relevant users. Safety-relevant facts (allergies) must never depend on retrieval recall.
+Notes with `pinned: true` (people profiles, household constraints) are **always** injected into the system prompt. Safety-relevant facts (allergies) must never depend on retrieval recall.
+
+**Scope (M3):** every user's pinned notes plus shared ones go into every prompt, DMs included, and into the speak-or-stay-silent judge's context. A DM decision is often "for both", and those are exactly the constraint-type notes §12 allows across users. Capped at `memory.pinned_max_chars` (default 6000), with a warning log when truncated. `avoid_tags` from `people/<user>.md` are shown alongside and enforced in code (§8.2).
+
+**Reading other people's notes:** `read_note` in the group can read every note; in a DM it can read the asker's and shared notes, plus everyone's pinned `people/*.md` profiles.
 
 ### 6.7 Memory write policy
 
 | Trigger | Behaviour |
 |---|---|
 | Explicit ("remember…", "note that…") | Claude calls `write_note` → written immediately, confirmed in chat. |
-| Implicit (Claude infers a durable fact) | Claude calls `propose_memory` → row in `memory_inbox`; approve/reject in dashboard. Setting `memory.auto_approve` (default **off**) skips the inbox. |
+| Implicit (Claude infers a durable fact) | Claude calls `propose_memory(owner, content, reason, topic)` → row in `memory_inbox` targeting `memories/<owner>/<topic>.md` (or `shared/topics/<topic>.md`); approve/reject in dashboard (M4) or, until then, with the admin's `/inbox` command in Telegram (✅ Save / ❌ Drop buttons, admin only). Approving appends `- <content>` to the target note via `NoteStore`. Setting `memory.auto_approve` (default **off**) skips the inbox, except for items that must be reviewed (web facts, §7.5). |
 | Contradiction | Claude must `read_note` first and update in place (`replace_section`), never append a contradicting line. |
 | Forget ("forget that I…") | Claude edits/removes the line; dashboard can delete whole notes. |
 
@@ -483,6 +493,17 @@ What matters here:
 **Default: int8 model weights, fp32 vector storage.** Precision is a seeded setting (`embedding.precision`, `int8` | `fp32`) so it can be flipped without code changes; whichever variant is configured must be the one baked into the image.
 
 **M3 acceptance check before locking the default:** a small offline eval (≈ 20 realistic notes mixing English, Singlish and Chinese; ≈ 15 queries with known answers) run through both variants, reporting recall@5 and peak RSS. If int8 misses a hit that fp32 finds, switch the default to fp32 and budget the RAM for it. Record the result here.
+
+**Result (M3, `scripts/embedding_eval.py`, 20 notes / 15 queries incl. Chinese and Singlish):**
+
+| | int8 | fp32 |
+|---|---|---|
+| Vector-only: recall@1 / recall@5 / MRR | 14/15 · 15/15 · 0.950 | 14/15 · 15/15 · 0.950 |
+| Hybrid: recall@1 / recall@5 / MRR | 14/15 · 15/15 · 0.967 | 14/15 · 15/15 · 0.967 |
+| Peak RSS, eval process (arm64 dev) | 519 MB | 916 MB |
+| Model files | 130 MB | ~470 MB |
+
+Identical ranks on every query (same two rank-2/rank-4 misses for both). **int8 is locked as the default.** In the amd64 image, offline, as uid 1000: model load ~2 s, peak RSS ~580 MB including indexing and a search, within the 1 GB limit. `embedding.precision` is read at startup (the model is loaded once), so changing it needs a restart; fp32 isn't baked into the image, so it's downloaded into `/data/models` on first start (or build with `--build-arg EMBED_PRECISION=fp32`). If the model can't load at all, the bot still runs: notes are written, chunks are marked `pending`, and search falls back to keywords until the next reconcile.
 
 ---
 
@@ -638,7 +659,7 @@ resolve_category(phrase, proposed_slug, description, proposed_tau_days, use_exis
 2. Filter by `include_tags` (option must have **all** of them) / `exclude_tags` (must have **none**) and hard constraints: option tags vs. the union of `avoid_tags` for every user in `for_users`. `avoid_tags` is a structured frontmatter list on `people/<slug>.md` (e.g. `avoid_tags: [contains:peanut, contains:coriander]`), parsed by code, so allergy filtering never depends on the LLM.
 3. Optionally union `extra_candidates` proposed by Claude (if `allow_generated`), each with weight 1.0. A candidate whose name matches any option in the category (active or not, casefolded) is dropped, so a filtered-out or deactivated option can't sneak back in. The tool schema **requires** `tags` on each candidate so the same constraint filter applies to them.
 
-Until M3 delivers `people/*.md`, only the `exclude_tags` Claude passes are enforced (known gap during M2).
+`avoid_tags` are applied in code on every pick, including 🎲 rerolls (re-read at reroll time), on top of whatever `exclude_tags` Claude passes; `random_pick` reports them back as `excluded_by_constraints`. Claude sets them with `write_note(..., add_avoid_tags=["contains:coriander"])` on `people/<user>.md` (only there). They only help for options tagged accordingly, so the persona asks Claude to tag allergens and key ingredients as `contains:<x>`, and pinned notes remain the second line of defence.
 
 ### 8.3 Weighting
 
@@ -713,7 +734,7 @@ User taps ✅ → callback → status='accepted', pref update, log note appended
   Claude can override the default `for_users` when context is clear; the default only applies when ambiguous.
 - **Formatting:** `parse_mode=HTML`. Claude writes plain text with a minimal markdown subset (`**bold**`, `_italic_`, `[text](url)`); code escapes `<`, `>`, `&`, converts that subset to HTML and splits at 4096 chars on the plain text first, so tags are always balanced. Claude never emits HTML.
 - **Single poller:** exactly one replica; a second instance causes `409 Conflict` from `getUpdates`. Compose `deploy.replicas` not used; documented in runbook.
-- **Commands:** `/pick <category>`, `/options <category>`, `/remember <text>`, `/forget <text>`, `/think <question>`, `/quiet [duration]`, `/unquiet`, `/settopic` (admin, M4: make this topic the answer topic, §10.4), `/help`.
+- **Commands:** `/pick <category>`, `/options <category>`, `/remember <text>`, `/forget <text>`, `/think <question>`, `/quiet [duration]`, `/unquiet`, `/inbox` (admin, M3: review pending memories), `/settopic` (admin, M4: make this topic the answer topic, §10.4), `/help`. `/remember` and `/forget` are passed to Claude as ordinary messages; the rules tell it to use `write_note`.
 
 ### 10.1 Seeing all group messages
 

@@ -58,3 +58,15 @@ def decision_keyboard(picks: Sequence[tuple[int, str]]) -> Keyboard | None:
         ]
         for did, name in picks
     ]
+
+
+_INBOX = re.compile(r"^m:(\d+):([ax])$")
+
+
+def inbox_keyboard(item_id: int) -> Keyboard:
+    return [[Button("✅ Save", f"m:{item_id}:a"), Button("❌ Drop", f"m:{item_id}:x")]]
+
+
+def parse_inbox_callback(data: str | None) -> tuple[int, bool] | None:
+    m = _INBOX.match(data or "")
+    return (int(m.group(1)), m.group(2) == "a") if m else None

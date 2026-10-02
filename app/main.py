@@ -17,6 +17,10 @@ from aiogram.exceptions import TelegramUnauthorizedError
 
 from app.ambient.judge import Judge
 from app.ambient.service import AmbientService
+from app.brain.embedder import FastEmbedder, cache_dir_for
+from app.brain.memory import MemoryService
+from app.brain.retrieval import Retriever
+from app.brain.store import NoteStore
 from app.config import Env
 from app.db.database import Database
 from app.db.migrate import apply_migrations
@@ -97,7 +101,31 @@ async def run(env: Env) -> None:
         if not llm.configured:
             log.warning("ANTHROPIC_API_KEY not set: running in fallback mode")
         tz = ZoneInfo(env.tz)
-        decisions = DecisionService(db=db, settings=settings, users=users)
+        runtime = await settings.load()
+        precision = runtime.embedding_precision
+        embedder = FastEmbedder(
+            precision, cache_dir_for(precision, env.embed_baked_dir, env.data_dir)
+        )
+        try:
+            await embedder.warm_up()
+        except Exception:
+            # Notes still get written and keyword search still works; chunks are marked
+            # 'pending' and re-embedded on the next reconcile (§14.4).
+            log.exception("embedding model failed to load")
+        store = NoteStore(root=env.data_dir / "vault", db=db, embedder=embedder, tz=tz)
+        created = await store.ensure_skeleton(users)
+        stats = await store.reconcile()
+        log.info("vault ready", extra={"created": created, **stats})
+        memory = MemoryService(
+            store=store,
+            retriever=Retriever(db, embedder),
+            db=db,
+            settings=settings,
+            users=users,
+        )
+        decisions = DecisionService(
+            db=db, settings=settings, users=users, constraints=memory.avoid_tags
+        )
         summarizer = Summarizer(db=db, settings=settings, llm=llm, users=users, tz=tz)
         orchestrator = Orchestrator(
             db=db,
@@ -107,6 +135,7 @@ async def run(env: Env) -> None:
             users=users,
             tz=tz,
             summarizer=summarizer,
+            memory=memory,
         )
         ambient = AmbientService(
             db=db,
@@ -116,6 +145,7 @@ async def run(env: Env) -> None:
             summarizer=summarizer,
             users=users,
             tz=tz,
+            memory=memory,
         )
         adapter = TelegramAdapter(
             db=db,
@@ -126,6 +156,7 @@ async def run(env: Env) -> None:
             me=me,
             users=users,
             tz=tz,
+            memory=memory,
         )
         dp = Dispatcher()
         dp.update.outer_middleware(
@@ -138,6 +169,7 @@ async def run(env: Env) -> None:
         finally:
             await ambient.close()
             await summarizer.close()
+            embedder.close()
     finally:
         await bot.session.close()
         await db.close()

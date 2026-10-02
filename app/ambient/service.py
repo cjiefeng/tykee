@@ -15,6 +15,7 @@ from app.ambient.debounce import Debouncer
 from app.ambient.judge import Judge, JudgeError
 from app.ambient.phrases import matches_any
 from app.ambient.rules import stage1
+from app.brain.memory import MemoryService
 from app.db.database import Database
 from app.db.repos import messages as messages_repo
 from app.db.repos import summaries as summaries_repo
@@ -56,8 +57,10 @@ class AmbientService:
         summarizer: Summarizer,
         users: Sequence[UserRecord],
         tz: ZoneInfo,
+        memory: MemoryService | None = None,
         clock: Callable[[], datetime] = utcnow,
     ) -> None:
+        self._memory = memory
         self._db = db
         self._settings = settings
         self._judge = judge
@@ -140,6 +143,9 @@ class AmbientService:
         context_lines = [f"Now: {now.astimezone(self._tz):%a %H:%M}"]
         if summary:
             context_lines.append(f"Earlier in this chat: {summary.text}")
+        pinned = await self._memory.pinned_block() if self._memory is not None else None
+        if pinned:
+            context_lines.append(pinned)
         if today_decisions:
             context_lines.append(
                 "Decisions today: "
