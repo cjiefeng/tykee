@@ -58,6 +58,7 @@ def create_app(deps: DashboardDeps) -> FastAPI:
         views_chat,
         views_import,
         views_memory,
+        views_ops,
         views_overview,
     )
 
@@ -96,14 +97,18 @@ def create_app(deps: DashboardDeps) -> FastAPI:
 
     @public.get("/healthz")
     async def healthz() -> JSONResponse:
-        """Unauthenticated liveness for the container healthcheck (M6); LAN-only like the rest."""
+        """Unauthenticated liveness for the container healthcheck (§14.1); LAN-only like the
+        rest. Answering at all proves the event loop is alive; 503 if the scheduler stopped."""
         h = deps.health
+        ok = h.scheduler_ok()
         return JSONResponse(
             {
-                "ok": True,
+                "ok": ok,
                 "uptime_s": int((utcnow() - h.started_at).total_seconds()),
                 "last_update_at": h.last_update_at.isoformat() if h.last_update_at else None,
-            }
+                "last_tick_at": h.last_tick_at.isoformat() if h.last_tick_at else None,
+            },
+            status_code=200 if ok else 503,
         )
 
     private = APIRouter(dependencies=[Depends(require_login), Depends(require_csrf)])
@@ -120,6 +125,7 @@ def create_app(deps: DashboardDeps) -> FastAPI:
         views_memory,
         views_chat,
         views_import,
+        views_ops,
     ):
         module.register(private, deps)
 

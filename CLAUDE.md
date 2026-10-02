@@ -70,7 +70,13 @@ All tooling runs inside Docker (no local Python/uv needed).
   `queries.py` (all dashboard SQL + validated `save_settings`), `views_*.py` per page,
   `templates/`, `static/` (see `static/VENDORED.md`). `python -m app.dashboard.hashpw` makes the
   password hash + session secret.
-- `app/health.py`: in-process health signals for the dashboard tiles.
+- `app/health.py`: in-process health signals for the dashboard tiles, the event-loop `heartbeat`
+  task (also touches `/data/.heartbeat`) and the `Watchdog` thread (exits on a 10-min stall so
+  Docker restarts it). `app/healthcheck.py`: the compose healthcheck (`/healthz` or heartbeat).
+- `app/nudges.py`: scheduled nudges (§10.3): schedule in settings `nudges.items`, engine pick, no
+  LLM, once per day via `nudge_runs`; the adapter is its `NudgeSender`.
+- `app/backup.py`: nightly `VACUUM INTO` copies (`/data/backups`, keep N) + vault git commit
+  (local repo, refuses if a remote exists). Ops procedures: [docs/runbook.md](docs/runbook.md).
 - `app/ambient/`: speak-or-stay-silent (§10.2). `rules.py` (pure stage-1), `debounce.py`
   (per-chat timers, in memory), `judge.py` (structured-output call), `state.py`
   (`chat_state`/`ambient_log`), `phrases.py` (mute/negative cues, `/quiet` durations),

@@ -19,6 +19,7 @@ from aiogram.exceptions import TelegramUnauthorizedError
 from app import inbox_appliers
 from app.ambient.judge import Judge
 from app.ambient.service import AmbientService
+from app.backup import BackupService
 from app.brain.embedder import FastEmbedder, cache_dir_for
 from app.brain.memory import MemoryService
 from app.brain.retrieval import Retriever
@@ -32,10 +33,11 @@ from app.db.migrate import apply_migrations
 from app.db.repos.users import UserRecord, load_enabled, upsert_allowlist
 from app.decisions.service import DecisionService
 from app.harvest import Harvester
-from app.health import HealthState
+from app.health import HEARTBEAT_FILE, HealthState, Watchdog, heartbeat
 from app.importer.service import ImportService
 from app.llm.client import AnthropicLLMClient
 from app.logging import LOG_BUFFER, setup_logging
+from app.nudges import NudgeService
 from app.orchestrator.orchestrator import Orchestrator
 from app.orchestrator.summary import Summarizer
 from app.scheduler import Scheduler
@@ -216,13 +218,36 @@ async def run(env: Env) -> None:
             imports_dir=env.data_dir / "imports",
         )
         importer.sweep()
-        scheduler = Scheduler(tz)
+        nudges = NudgeService(
+            db=db,
+            settings=settings,
+            decisions=decisions,
+            sender=adapter,
+            users=users,
+            tz=tz,
+            group_id=lambda: registry.group_id,
+        )
+        backups = BackupService(
+            db=db,
+            settings=settings,
+            backup_dir=env.data_dir / "backups",
+            vault=store.root,
+            tz=tz,
+            health=health,
+        )
+        scheduler = Scheduler(tz, health)
         scheduler.every_minute("harvest", harvester.tick)
         scheduler.every_minute("import", importer.tick)
+        scheduler.every_minute("nudges", nudges.tick)
+        scheduler.every_minute("backup", backups.tick)
+        scheduler.every("embed_retry", store.retry_pending, minutes=60)
         scheduler.start()
+        beat_task = asyncio.create_task(heartbeat(health, env.data_dir / HEARTBEAT_FILE))
+        watchdog = Watchdog(health)
+        watchdog.start()
         dashboard: uvicorn.Server | None = None
         dashboard_task: asyncio.Task[None] | None = None
-        if env.dashboard_password_hash and len(env.session_secret) >= 32:
+        if env.dashboard_enabled:
             dashboard_app = create_app(
                 DashboardDeps(
                     db=db,
@@ -244,6 +269,8 @@ async def run(env: Env) -> None:
                     ambient=ambient,
                     embed_model=embedder.model_id,
                     importer=importer,
+                    nudges=nudges,
+                    backups=backups,
                 )
             )
             dashboard = make_server(dashboard_app, env.dashboard_host, env.dashboard_port)
@@ -261,6 +288,8 @@ async def run(env: Env) -> None:
             if dashboard is not None and dashboard_task is not None:
                 dashboard.should_exit = True
                 await dashboard_task
+            watchdog.stop()
+            beat_task.cancel()
             scheduler.shutdown()
             await ambient.close()
             await summarizer.close()

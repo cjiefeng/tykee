@@ -9,7 +9,7 @@ from typing import Any
 from fastapi import APIRouter, Form, Request
 from fastapi.responses import HTMLResponse, Response
 
-from app.dashboard import queries
+from app.dashboard import queries, views_ops
 from app.dashboard.core import DashboardDeps, back, render
 from app.settings import get_value
 from app.timeutil import utcnow
@@ -132,6 +132,7 @@ def register(router: APIRouter, deps: DashboardDeps) -> None:
             runs=await queries.harvest_runs(deps.db),
             cursors=await queries.harvest_cursors(deps.db),
             health=deps.health,
+            **await views_ops.nudge_context(deps),
         )
 
     @router.post("/ambient/settings")

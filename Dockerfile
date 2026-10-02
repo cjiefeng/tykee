@@ -15,6 +15,9 @@ RUN /app/.venv/bin/python -c "from pathlib import Path; from app.brain.embedder 
  && rm -rf /app/models/.locks && chmod -R a+rX /app/models
 
 FROM python:3.12-slim
+# git: nightly vault commits into its own local repo (§14.2).
+RUN apt-get update && apt-get install -y --no-install-recommends git \
+ && rm -rf /var/lib/apt/lists/*
 RUN useradd --uid 1000 --create-home tykee && mkdir /data && chown tykee:tykee /data
 COPY --from=build /app/.venv /app/.venv
 COPY --from=build /app/models /app/models

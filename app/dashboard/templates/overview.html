@@ -41,6 +41,12 @@
     <div class="muted small">{% if counts.last_harvest %}last run {{ counts.last_harvest[0] | ago }} ({{ counts.last_harvest[1] }}){% else %}no runs yet{% endif %}</div></div>
   <div class="card"><h3>Database</h3><div>{{ (db_bytes / 1048576) | round(1) }} MB</div>
     <div class="muted small">up {{ health.started_at | ago }}</div></div>
+  <div class="card"><h3>Backups</h3>
+    {% if health.last_backup_error %}<div class="dot bad">last backup failed</div>
+    {% elif not backup_enabled %}<div class="dot warn">nightly backups off</div>
+    {% elif not latest_backup %}<div class="dot warn">none yet</div>
+    {% else %}<div class="dot {{ 'warn' if backup_stale else 'ok' }}">last {{ latest_backup.modified | ago }}</div>{% endif %}
+    <div class="muted small"><a href="/system">{{ backups | length }} kept</a></div></div>
 </div>
 
 {% if spend.by_purpose %}

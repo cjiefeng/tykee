@@ -38,5 +38,11 @@
   "harvest.context_messages": 10,
   "budget.warn_ratio": 0.8,
   "import.max_upload_mb": 200,
-  "import.poll_min": 5
+  "import.poll_min": 5,
+  "nudges.enabled": false,
+  "nudges.grace_min": 30,
+  "nudges.items": [],
+  "backup.enabled": true,
+  "backup.time": "03:00",
+  "backup.keep": 14
 }

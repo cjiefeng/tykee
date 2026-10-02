@@ -6,15 +6,18 @@ import json
 import re
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
+from datetime import timedelta
 
 import httpx
 import pytest
 
 from app import inbox_appliers
+from app.backup import BackupService
 from app.dashboard.app import create_app
 from app.dashboard.core import DashboardDeps, hash_password
 from app.harvest import Harvester
 from app.importer.service import ImportService
+from app.nudges import NudgeService
 from app.settings import get_value, set_value
 from app.telegram.topics import KEY_ANSWER
 from tests.conftest import GROUP_ID, TZ, Env, Stack, make_stack, seed_category, tg_message
@@ -112,6 +115,25 @@ async def dash(env: Env) -> AsyncIterator[Dash]:
             imports_dir=env.vault.parent / "imports",
             clock=stack.clock,
         ),
+        nudges=NudgeService(
+            db=env.db,
+            settings=env.settings,
+            decisions=stack.decisions,
+            sender=stack.adapter,
+            users=env.users,
+            tz=TZ,
+            group_id=lambda: GROUP_ID,
+            clock=stack.clock,
+        ),
+        backups=BackupService(
+            db=env.db,
+            settings=env.settings,
+            backup_dir=env.vault.parent / "backups",
+            vault=env.vault,
+            tz=TZ,
+            health=stack.health,
+            clock=stack.clock,
+        ),
     )
     async with _client(create_app(deps)) as client:
         yield Dash(client, stack, deps)
@@ -141,6 +163,12 @@ async def test_pages_require_login_but_healthz_doesnt(dash: Dash) -> None:
     assert r.status_code == 303 and r.headers["location"] == "/login"
     h = await dash.client.get("/healthz")
     assert h.status_code == 200 and h.json()["ok"] is True
+
+
+async def test_healthz_503_when_scheduler_stops(dash: Dash) -> None:
+    dash.stack.health.started_at -= timedelta(minutes=30)  # no scheduler tick since
+    h = await dash.client.get("/healthz")
+    assert h.status_code == 503 and h.json()["ok"] is False
 
 
 async def test_login_wrong_password_and_lockout(dash: Dash) -> None:
@@ -585,3 +613,63 @@ async def test_import_upload_size_limit(dash: Dash, env: Env) -> None:
     big = {"export": ("result.json", b"x" * (3 * 1024 * 1024), "application/json")}
     await dash.post("/import/upload", files=big)
     assert "Too big" in await dash.flash("/import")
+
+
+# --- M6: nudges & backups --------------------------------------------------------------------
+
+
+async def test_nudges_add_toggle_send_delete(dash: Dash, env: Env) -> None:
+    await dash.login()
+    await seed_category(env, "dinner", [("Thai", [])])
+    page = await dash.flash("/ambient")
+    assert "Scheduled nudges" in page and "No nudges yet." in page
+    r = await dash.post("/nudges/settings", {"nudges.enabled": "on", "nudges.grace_min": "20"})
+    assert r.status_code == 303
+    s = await env.settings.load()
+    assert s.nudges_enabled and s.nudges_grace_min == 20
+
+    r = await dash.client.post(
+        "/nudges/add",
+        data={"csrf": dash.csrf, "time": "17:30", "category": "dinner", "target": "group",
+              "days": ["mon", "fri"]},
+    )  # fmt: skip
+    assert r.status_code == 303
+    [n] = (await env.settings.load()).nudges_items
+    assert (n.id, n.time, n.days, n.category, n.target) == (
+        "dinner-1730",
+        "17:30",
+        ["mon", "fri"],
+        "dinner",
+        "group",
+    )
+    assert "Nudge added" in await dash.flash("/ambient")
+
+    await dash.post("/nudges/add", {"time": "17:30", "category": "nope"})
+    assert "Pick an existing category" in await dash.flash("/ambient")
+    await dash.post("/nudges/add", {"time": "17:30", "category": "dinner"})  # no days
+    assert "Not saved" in await dash.flash("/ambient")
+
+    await dash.post("/nudges/dinner-1730/toggle")
+    assert (await env.settings.load()).nudges_items[0].enabled is False
+    await dash.post("/nudges/dinner-1730/send")
+    assert "Nudge sent." in await dash.flash("/ambient")
+    assert dash.stack.gateway.sent[-1].text.startswith("🎲 Dinner? I'm thinking **Thai**")
+    page = await dash.flash("/ambient")
+    assert "dinner-1730" in page and "sent" in page
+
+    await dash.post("/nudges/dinner-1730/delete")
+    assert (await env.settings.load()).nudges_items == []
+
+
+async def test_backup_now_list_and_download(dash: Dash) -> None:
+    await dash.login()
+    assert "none yet" in await dash.flash("/")
+    r = await dash.post("/system/backup")
+    assert r.status_code == 303
+    page = await dash.flash("/system")
+    assert "Backed up to bot-20261002.db" in page and "Download" in page
+    d = await dash.client.get("/system/backups/bot-20261002.db")
+    assert d.status_code == 200 and d.content.startswith(b"SQLite format 3")
+    for bad in ("bot-2026.db", "..%2Fbot.db", "bot-20261003.db"):
+        assert (await dash.client.get(f"/system/backups/{bad}")).status_code == 404
+    assert "last just now" in await dash.flash("/")

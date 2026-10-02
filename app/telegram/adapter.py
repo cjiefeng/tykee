@@ -514,6 +514,15 @@ class TelegramAdapter:
         )
         return ids[0] if ids else None
 
+    # --- scheduled nudges (§10.3) ----------------------------------------------------------------
+
+    async def send_nudge(
+        self, chat_id: int, text: str, picks: Sequence[tuple[int, str]], *, group: bool
+    ) -> list[int]:
+        """``NudgeSender``: group nudges go to the answer topic like every other group send."""
+        thread = await self._group_thread() if group else None
+        return await self._send(chat_id, text, picks=picks, thread=thread)
+
     # --- reactions -----------------------------------------------------------------------------
 
     async def handle_reaction(self, reaction: MessageReactionUpdated) -> None:

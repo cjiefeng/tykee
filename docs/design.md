@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **Status** | Draft v1.23 (Google Maps links → places, M8, §10.5) |
+| **Status** | Draft v1.24 (M6 ops: nudges, backups, healthcheck + watchdog, runbook) |
 | **Name** | Tykee: phonetic spelling of Tyche, the Greek goddess of chance. Telegram handle e.g. `@TykeeBot` (must end in "bot") |
 | **Author** | Jack |
 | **Date** | 2026-10-01 |
@@ -802,6 +802,12 @@ A nudge means the bot **starts** a conversation without anyone asking, on a sche
 - Off by default, since the group is meant to be used on demand.
 - When an answer topic is configured (§10.4), nudges are posted into that topic (`message_thread_id` set explicitly).
 
+**Implementation notes (M6):**
+- **Settings, not a table:** `nudges.enabled` (master toggle, `false`), `nudges.grace_min` (30) and `nudges.items`, a list of `{id, time "HH:MM", days ["mon"…], category, target, enabled}`. `target` is `group` or a user slug (DM to that person). Edited on the **Ambient** page (add, pause, delete, **Send now**); validated with the rest of the settings.
+- **No Claude call.** The text is built in code from a normal engine pick (`for_users` = `both` in the group, the person in a DM): "🎲 Dinner? I'm thinking **Thai** (last time was 9 days ago)", with the usual ✅🎲❌ keyboard. So nudges cost nothing and still work in fallback mode. The message is stored in history, so a reply like "sure" has context.
+- **Timing:** the scheduler ticks every minute; a nudge fires when its time is within the last `grace_min` minutes on one of its days (household TZ), so a restart just after 17:30 still sends it. At most once per nudge per day: each outcome (`sent`/`skipped`/`failed` + reason) goes into `nudge_runs` (migration 0008), shown under "Recent nudges".
+- **Skip rules:** group muted (`chat_state.muted_until`), or a pick for that category is already pending/accepted today in that chat (or observed by the harvester); also unknown category/target, no options, no group. **Send now** ignores the schedule, toggle and skip rules (it's a test) and counts as today's run.
+
 ### 10.4 Forum topics: read everywhere, answer in one topic (M4)
 
 The group has **Topics** enabled. Tykee **reads and learns from every topic**, but only **speaks in one answer topic** (initially **#Tykee**), which the admin can change from the dashboard at any time. Telegram has no per-topic bot permission (member permissions are group-wide, and as a group admin the bot receives updates from every topic), so this split is enforced in Tykee's code.
@@ -1046,10 +1052,10 @@ LAN-only at `http://<nas>:8081` (host port 8081 maps to 8080 in the container; 8
 | **Categories & Options** | Feed of newly created categories with usage counts; merge/rename categories; edit τ, default N, allow_generated, aliases; CRUD options (tags, base weight, owner), view per-user pref multipliers, reset prefs. |
 | **Memory** | Browse vault tree, search (same hybrid retriever), view/edit/delete notes, toggle pinned, **Inbox** approve/reject. |
 | **Import** | Telegram export upload wizard: validate, choose chats/date range, map senders, cost estimate + consent, progress/cancel, review with evidence, apply (§15.2). |
-| **Ambient** | Speak-or-silent settings (debounce, threshold, cooldown, daily cap, judge prompt), `ambient_log` timeline with reasons and feedback, mute status, scheduled nudges. |
+| **Ambient** | Speak-or-silent settings (debounce, threshold, cooldown, daily cap, judge prompt), `ambient_log` timeline with reasons and feedback, mute status, scheduled nudges (M6: schedule editor, Send now, recent runs, §10.3). |
 | **Conversations** | Per-chat transcript including tool calls (debugging). |
-| **Users** | Names, Telegram IDs, timezone, nudge schedule. **Telegram (M4, §10.4):** allowed group id; **answer topic dropdown** (known topics with names, message counts, last activity; change takes effect immediately); ignored topics; off-topic mention mode (`ignore`/`redirect`); label unnamed topics. |
-| **System** | Reindex vault, run backup now, download backup, view logs tail. |
+| **Users** | Names, Telegram IDs, timezone (nudge schedules live on Ambient). **Telegram (M4, §10.4):** allowed group id; **answer topic dropdown** (known topics with names, message counts, last activity; change takes effect immediately); ignored topics; off-topic mention mode (`ignore`/`redirect`); label unnamed topics. |
+| **System** | Reindex vault, back up now, list + download backups (last error, last vault commit), scheduler liveness, view logs tail. |
 
 All settings are read from SQLite on each request, so changes apply instantly with no restart.
 
@@ -1060,7 +1066,7 @@ All settings are read from SQLite on each request, so changes apply instantly wi
 - **Restart needed for:** user display names/timezones (users are loaded at startup) and `embedding.precision`.
 - **Budget:** tiles turn amber at `budget.warn_ratio` (0.8) and red at 100%. When a reply hits the cap, the admin gets one Telegram DM per household day (§14.4).
 - **Visual system (refreshed in M5):** one stylesheet (`static/app.css`) built on semantic tokens with light and dark values (follows the OS setting), system fonts (works offline), one accent colour, green/amber/red only for state and always with text. Sidebar navigation grouped Decisions / Memory / Admin at 1024px and wider, a scrolling nav strip below that; wide tables scroll inside their panel on phones. Skip link, visible focus rings, announced flash messages, 44px touch targets on touch screens, reduced motion respected. No emoji as icons.
-- **Not built in M4:** the `/think` escalation heuristic (§7.1) has no dashboard control because it doesn't exist yet; `models.escalated` is editable for when it does. Backups (M6) show a placeholder; the Import page arrived in M5 (§15.6).
+- **Not built in M4:** the `/think` escalation heuristic (§7.1) has no dashboard control because it doesn't exist yet; `models.escalated` is editable for when it does. Backups arrived in M6 (§14.2); the Import page arrived in M5 (§15.6).
 
 ---
 
@@ -1114,7 +1120,15 @@ services:
     healthcheck:
       test: ["CMD", "python", "-m", "app.healthcheck"]
       interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 3m          # model warm-up + vault reconcile
+    logging:                    # json-file, 5 × 10 MB
+      driver: json-file
+      options: { max-size: "10m", max-file: "5" }
 ```
+
+**Healthcheck (M6):** `python -m app.healthcheck` calls `/healthz`, which answers only if the event loop is responsive and returns 503 when the scheduler hasn't ticked for 5 minutes. Without dashboard secrets there's no HTTP server, so it checks that `/data/.heartbeat` (touched every minute by the event loop) is under 3 minutes old. Plain Docker doesn't restart *unhealthy* containers, so the process also runs a **watchdog thread**: if the event loop stops beating for 10 minutes, it logs `event loop stalled` and exits, and `restart: unless-stopped` brings it back. Operations are documented in [runbook.md](runbook.md).
 
 `.env`:
 
@@ -1143,10 +1157,12 @@ Notes:
 
 The vector/FTS index is in the DB backup, but can always be rebuilt from the vault, so the vault plus app tables are what truly matter.
 
+**Implementation notes (M6):** `BackupService` ticks every minute and runs once per household day at or after `backup.time` ("done today" = today's file exists, so a NAS that was off at 03:00 catches up later that day). `VACUUM INTO` runs on a read-only pool connection (to a temp name, then renamed), so the writer is never blocked; the newest `backup.keep` files are kept. The vault commit runs right after it (not at a separate 03:05) using the `git` binary installed in the image; the repo is created on first run, nothing is committed when nothing changed, and it **refuses to commit if a remote has been configured** (§12). System → **Back up now** replaces today's file; each file is downloadable. Failures show on the Overview **Backups** tile (amber when the newest copy is over 36 h old). Restore steps: [runbook.md](runbook.md). Settings: `backup.enabled`, `backup.time`, `backup.keep`.
+
 ### 14.3 Observability
 
 - Structured JSON logs to stdout (Docker log rotation on).
-- Dashboard health tiles: poller last-update time, Claude error rate (24h), index chunk count, DB size.
+- Dashboard health tiles: poller last-update time, Claude error rate (24h), index chunk count, DB size, last backup (M6). System shows when the scheduler last ticked.
 
 ### 14.4 Failure modes
 
@@ -1155,9 +1171,11 @@ The vector/FTS index is in the DB backup, but can always be rebuilt from the vau
 | Claude API error / timeout | Retry with backoff (2×), then fallback pick + "my brain's offline, here's a random pick". |
 | Budget exhausted | Fallback mode; notify admin via Telegram DM once per day. |
 | Telegram network blip | aiogram polling retries automatically. |
-| Embedding failure on write | Note file still written; chunk marked `embed_model='pending'`; reconcile job retries. |
+| Embedding failure on write | Note file still written; chunk marked `embed_model='pending'`; an hourly job re-runs reconcile while any chunk is pending (M6). |
 | Corrupt/missing index | `System → Reindex` drops index tables and rebuilds from vault. |
 | NAS reboot | `restart: unless-stopped`; startup reconcile. |
+| Event loop hung | Watchdog thread exits the process after 10 min without a heartbeat; Docker restarts it (§14.1). |
+| Nightly backup fails | Logged, red Backups tile with the error; retried on the next tick that day (today's file is missing). |
 
 ### 14.5 CI and deploying
 
@@ -1165,14 +1183,14 @@ The vector/FTS index is in the DB backup, but can always be rebuilt from the vau
 
 | Job | What |
 |---|---|
-| lint · types · tests | `ruff check`, `ruff format --check`, `mypy --strict`, `pytest` (offline unit tests; `-m integration` stays opt-in), in `ghcr.io/astral-sh/uv:python3.12-bookworm-slim`, the same image `make check` uses, so local and CI results match (its Python allows loading `sqlite-vec`) |
+| lint · types · tests | installs `git` (vault backup tests), `ruff check`, `ruff format --check`, `mypy --strict`, `pytest` (offline unit tests; `-m integration` stays opt-in), in `ghcr.io/astral-sh/uv:python3.12-bookworm-slim`, the same image `make check` uses, so local and CI results match (its Python allows loading `sqlite-vec`) |
 | shellcheck | `deploy.sh` |
 | no bot data committed | fails if any tracked path looks like a DB, vault, model file or `.env` |
 | docker build | `linux/amd64` image build (includes baking the embedding model), after the checks pass; layer cache in GitHub Actions; nothing is pushed |
 
 No secrets are used: unit tests run with fakes and no API key. There's no deploy from CI; the NAS is LAN-only.
 
-**Deploying** (`deploy.sh`, on the NAS): `./deploy.sh [branch]` → pull (optionally switch branch) → check `.env` (token, allowlist), data dir ownership (uid 1000) and that the data dir isn't inside the repo un-ignored → `docker compose build` → `up -d` → wait for the `polling` log line; on a startup error it prints the logs and the rollback command (`./deploy.sh <previous commit>`).
+**Deploying** (`deploy.sh`, on the NAS): `./deploy.sh [branch]` → pull (optionally switch branch) → check `.env` (token, allowlist), data dir ownership (uid 1000) and that the data dir isn't inside the repo un-ignored → `docker compose build` → `up -d` → wait for the `polling` log line, then for the container healthcheck to report `healthy` (warns, doesn't fail); on a startup error it prints the logs and the rollback command (`./deploy.sh <previous commit>`).
 
 ---
 
