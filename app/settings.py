@@ -58,6 +58,10 @@ class RuntimeSettings(BaseModel):
     ambient_mute_phrases: list[str] = Field(default_factory=list)
     ambient_judge_prompt: str = ""
     summary_batch: int = 20
+    embedding_precision: Literal["int8", "fp32"] = "int8"
+    memory_auto_approve: bool = False
+    memory_search_k: int = 6
+    memory_pinned_max_chars: int = 6000
 
     def model_for(self, role: ModelRole) -> str:
         return str(getattr(self.models, role))

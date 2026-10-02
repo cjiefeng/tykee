@@ -14,6 +14,9 @@ from aiogram.types import Chat, Message, MessageEntity, User
 
 from app.ambient.judge import Judge
 from app.ambient.service import AmbientService
+from app.brain.memory import MemoryService
+from app.brain.retrieval import Retriever
+from app.brain.store import NoteStore
 from app.config import parse_allowlist
 from app.db.database import Database
 from app.db.migrate import apply_migrations
@@ -24,6 +27,7 @@ from app.orchestrator.summary import Summarizer
 from app.settings import SettingsStore, seed_settings
 from app.telegram.adapter import TelegramAdapter
 from app.telegram.addressing import BotIdentity
+from tests.fakes.fake_embedder import FakeEmbedder
 from tests.fakes.fake_gateway import FakeGateway
 from tests.fakes.fake_llm import FakeLLMClient
 
@@ -44,6 +48,7 @@ class Env:
     db: Database
     users: list[UserRecord]
     settings: SettingsStore
+    vault: Path
     closers: list[Callable[[], Awaitable[None]]] = field(default_factory=list)
 
     @property
@@ -67,7 +72,7 @@ async def env(tmp_path: Path) -> AsyncIterator[Env]:
         return load_enabled(conn, ALLOWLIST)
 
     users = await db.write(_seed)
-    e = Env(db=db, users=users, settings=SettingsStore(db))
+    e = Env(db=db, users=users, settings=SettingsStore(db), vault=tmp_path / "vault")
     yield e
     for close in e.closers:
         await close()
@@ -132,14 +137,32 @@ class Stack:
     clock: Clock
     ambient: AmbientService
     summarizer: Summarizer
+    memory: MemoryService
+    store: NoteStore
+    embedder: FakeEmbedder
 
 
 def make_stack(env: Env, llm: FakeLLMClient | None = None, seed: int = 7) -> Stack:
     clock = Clock()
     llm = llm or FakeLLMClient()
     gw = FakeGateway()
+    embedder = FakeEmbedder()
+    store = NoteStore(root=env.vault, db=env.db, embedder=embedder, tz=TZ, clock=clock)
+    memory = MemoryService(
+        store=store,
+        retriever=Retriever(env.db, embedder),
+        db=env.db,
+        settings=env.settings,
+        users=env.users,
+        clock=clock,
+    )
     decisions = DecisionService(
-        db=env.db, settings=env.settings, users=env.users, clock=clock, rng=random.Random(seed)
+        db=env.db,
+        settings=env.settings,
+        users=env.users,
+        clock=clock,
+        rng=random.Random(seed),
+        constraints=memory.avoid_tags,
     )
     summarizer = Summarizer(db=env.db, settings=env.settings, llm=llm, users=env.users, tz=TZ)
     orch = Orchestrator(
@@ -150,6 +173,7 @@ def make_stack(env: Env, llm: FakeLLMClient | None = None, seed: int = 7) -> Sta
         users=env.users,
         tz=TZ,
         summarizer=summarizer,
+        memory=memory,
         clock=clock,
     )
     ambient = AmbientService(
@@ -160,6 +184,7 @@ def make_stack(env: Env, llm: FakeLLMClient | None = None, seed: int = 7) -> Sta
         summarizer=summarizer,
         users=env.users,
         tz=TZ,
+        memory=memory,
         clock=clock,
     )
     adapter = TelegramAdapter(
@@ -171,9 +196,12 @@ def make_stack(env: Env, llm: FakeLLMClient | None = None, seed: int = 7) -> Sta
         me=BOT,
         users=env.users,
         tz=TZ,
+        memory=memory,
     )
     env.closers += [ambient.close, summarizer.close]
-    return Stack(adapter, gw, decisions, orch, llm, clock, ambient, summarizer)
+    return Stack(
+        adapter, gw, decisions, orch, llm, clock, ambient, summarizer, memory, store, embedder
+    )
 
 
 async def seed_category(

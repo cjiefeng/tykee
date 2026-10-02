@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **Status** | Draft v1.14 (topics: read all, answer only in a dashboard-selected topic; memory harvester, §10.4) |
+| **Status** | Draft v1.18 (bot data never in git; CI and deploy.sh, §14.5) |
 | **Name** | Tykee: phonetic spelling of Tyche, the Greek goddess of chance. Telegram handle e.g. `@TykeeBot` (must end in "bot") |
 | **Author** | Jack |
 | **Date** | 2026-10-01 |
@@ -276,6 +276,9 @@ CREATE TABLE memory_inbox (
   target_path TEXT NOT NULL,
   content     TEXT NOT NULL,
   reason      TEXT,                              -- what in the chat triggered it
+  source      TEXT,                              -- provenance: telegram:<chat>, web:<url> (M7), topic:<name> (M4)  (0004)
+  decided_at  TEXT,                              -- (0004)
+  decided_by  INTEGER REFERENCES users(id),      -- NULL when auto-approved (0004)
   status      TEXT NOT NULL DEFAULT 'pending',   -- 'pending'|'approved'|'rejected'
   created_at  TEXT NOT NULL DEFAULT (datetime('now'))
 );
@@ -409,7 +412,9 @@ Jack likes spicy food but not numbing (mala) spice. See [[shared/topics/sichuan]
 2. Render frontmatter + body; write to `path.tmp`, `fsync`, `rename()` (atomic).
 3. Parse → chunk → diff `chunk_hash` against DB → embed only new/changed chunks (thread pool).
 4. In one SQLite transaction: upsert `notes`, replace `chunks`/`chunks_fts`/`chunks_vec`/`links` for that note.
-5. Mark the vault dirty for the nightly git commit.
+5. Mark the vault dirty for the nightly git commit (M6; until then the nightly job simply commits whatever changed).
+
+`write_note` modes: `create` (fails if the note exists), `append` (optionally under a heading, created as `##` if missing), `replace_section` (rewrite one section: contradictions), `replace` (rewrite the body, keeping the title: forgetting a line). A new note gets a ULID, owner and type from its path (`people/` → profile, `shared/places/` → place, otherwise fact), and a readable title from its filename unless one is given. Only notes under `people/<user>.md`, `memories/<user>/`, `shared/household.md`, `shared/places/` and `shared/topics/` are writable by Claude; `logs/` is internal.
 
 `logs/` is written through `NoteStore` but excluded from the index (steps 3–4 skipped), so decision logs never crowd out real memories in retrieval.
 
@@ -425,6 +430,7 @@ Jack likes spicy food but not numbing (mala) spice. See [[shared/topics/sichuan]
 
 ```
 input: query, asker, scope ('me'|'partner'|'both'|'shared'), k=6
+       scope 'partner' = every user except the asker; default scope: group → 'both', DM → 'me' 
 
 1. owner_filter = {asker_slug, 'shared'}          (+ partner's slug if scope == 'both')
 2. fts  = top 30 from chunks_fts MATCH query       → join chunks/notes, filter owner, rank by bm25
@@ -438,14 +444,18 @@ KNN over-fetches (30) and filters by owner afterwards; at this data size that's 
 
 ### 6.6 Pinned context
 
-Notes with `pinned: true` (people profiles, household constraints) are **always** injected into the system prompt for the relevant users. Safety-relevant facts (allergies) must never depend on retrieval recall.
+Notes with `pinned: true` (people profiles, household constraints) are **always** injected into the system prompt. Safety-relevant facts (allergies) must never depend on retrieval recall.
+
+**Scope (M3):** every user's pinned notes plus shared ones go into every prompt, DMs included, and into the speak-or-stay-silent judge's context. A DM decision is often "for both", and those are exactly the constraint-type notes §12 allows across users. Capped at `memory.pinned_max_chars` (default 6000), with a warning log when truncated. `avoid_tags` from `people/<user>.md` are shown alongside and enforced in code (§8.2).
+
+**Reading other people's notes:** `read_note` in the group can read every note; in a DM it can read the asker's and shared notes, plus everyone's pinned `people/*.md` profiles.
 
 ### 6.7 Memory write policy
 
 | Trigger | Behaviour |
 |---|---|
 | Explicit ("remember…", "note that…") | Claude calls `write_note` → written immediately, confirmed in chat. |
-| Implicit (Claude infers a durable fact) | Claude calls `propose_memory` → row in `memory_inbox`; approve/reject in dashboard. Setting `memory.auto_approve` (default **off**) skips the inbox. |
+| Implicit (Claude infers a durable fact) | Claude calls `propose_memory(owner, content, reason, topic)` → row in `memory_inbox` targeting `memories/<owner>/<topic>.md` (or `shared/topics/<topic>.md`); approve/reject in dashboard (M4) or, until then, with the admin's `/inbox` command in Telegram (✅ Save / ❌ Drop buttons, admin only). Approving appends `- <content>` to the target note via `NoteStore`. Setting `memory.auto_approve` (default **off**) skips the inbox, except for items that must be reviewed (web facts, §7.5). |
 | Contradiction | Claude must `read_note` first and update in place (`replace_section`), never append a contradicting line. |
 | Forget ("forget that I…") | Claude edits/removes the line; dashboard can delete whole notes. |
 
@@ -483,6 +493,17 @@ What matters here:
 **Default: int8 model weights, fp32 vector storage.** Precision is a seeded setting (`embedding.precision`, `int8` | `fp32`) so it can be flipped without code changes; whichever variant is configured must be the one baked into the image.
 
 **M3 acceptance check before locking the default:** a small offline eval (≈ 20 realistic notes mixing English, Singlish and Chinese; ≈ 15 queries with known answers) run through both variants, reporting recall@5 and peak RSS. If int8 misses a hit that fp32 finds, switch the default to fp32 and budget the RAM for it. Record the result here.
+
+**Result (M3, `scripts/embedding_eval.py`, 20 notes / 15 queries incl. Chinese and Singlish):**
+
+| | int8 | fp32 |
+|---|---|---|
+| Vector-only: recall@1 / recall@5 / MRR | 14/15 · 15/15 · 0.950 | 14/15 · 15/15 · 0.950 |
+| Hybrid: recall@1 / recall@5 / MRR | 14/15 · 15/15 · 0.967 | 14/15 · 15/15 · 0.967 |
+| Peak RSS, eval process (arm64 dev) | 519 MB | 916 MB |
+| Model files | 130 MB | ~470 MB |
+
+Identical ranks on every query (same two rank-2/rank-4 misses for both). **int8 is locked as the default.** In the amd64 image, offline, as uid 1000: model load ~2 s, peak RSS ~580 MB including indexing and a search, within the 1 GB limit. `embedding.precision` is read at startup (the model is loaded once), so changing it needs a restart; fp32 isn't baked into the image, so it's downloaded into `/data/models` on first start (or build with `--build-arg EMBED_PRECISION=fp32`). If the model can't load at all, the bot still runs: notes are written, chunks are marked `pending`, and search falls back to keywords until the next reconcile.
 
 ---
 
@@ -638,7 +659,7 @@ resolve_category(phrase, proposed_slug, description, proposed_tau_days, use_exis
 2. Filter by `include_tags` (option must have **all** of them) / `exclude_tags` (must have **none**) and hard constraints: option tags vs. the union of `avoid_tags` for every user in `for_users`. `avoid_tags` is a structured frontmatter list on `people/<slug>.md` (e.g. `avoid_tags: [contains:peanut, contains:coriander]`), parsed by code, so allergy filtering never depends on the LLM.
 3. Optionally union `extra_candidates` proposed by Claude (if `allow_generated`), each with weight 1.0. A candidate whose name matches any option in the category (active or not, casefolded) is dropped, so a filtered-out or deactivated option can't sneak back in. The tool schema **requires** `tags` on each candidate so the same constraint filter applies to them.
 
-Until M3 delivers `people/*.md`, only the `exclude_tags` Claude passes are enforced (known gap during M2).
+`avoid_tags` are applied in code on every pick, including 🎲 rerolls (re-read at reroll time), on top of whatever `exclude_tags` Claude passes; `random_pick` reports them back as `excluded_by_constraints`. Claude sets them with `write_note(..., add_avoid_tags=["contains:coriander"])` on `people/<user>.md` (only there). They only help for options tagged accordingly, so the persona asks Claude to tag allergens and key ingredients as `contains:<x>`, and pinned notes remain the second line of defence.
 
 ### 8.3 Weighting
 
@@ -713,7 +734,7 @@ User taps ✅ → callback → status='accepted', pref update, log note appended
   Claude can override the default `for_users` when context is clear; the default only applies when ambiguous.
 - **Formatting:** `parse_mode=HTML`. Claude writes plain text with a minimal markdown subset (`**bold**`, `_italic_`, `[text](url)`); code escapes `<`, `>`, `&`, converts that subset to HTML and splits at 4096 chars on the plain text first, so tags are always balanced. Claude never emits HTML.
 - **Single poller:** exactly one replica; a second instance causes `409 Conflict` from `getUpdates`. Compose `deploy.replicas` not used; documented in runbook.
-- **Commands:** `/pick <category>`, `/options <category>`, `/remember <text>`, `/forget <text>`, `/think <question>`, `/quiet [duration]`, `/unquiet`, `/settopic` (admin, M4: make this topic the answer topic, §10.4), `/help`.
+- **Commands:** `/pick <category>`, `/options <category>`, `/remember <text>`, `/forget <text>`, `/think <question>`, `/quiet [duration]`, `/unquiet`, `/inbox` (admin, M3: review pending memories), `/settopic` (admin, M4: make this topic the answer topic, §10.4), `/help`. `/remember` and `/forget` are passed to Claude as ordinary messages; the rules tell it to use `write_note`.
 
 ### 10.1 Seeing all group messages
 
@@ -828,14 +849,37 @@ Every outbound group message (replies, decision keyboards, ambient interjections
 
 Messages in non-answer topics never trigger a Claude call in real time. Instead a scheduled job turns them into memory in small batches:
 
+**Two stages: a cheap code check every 30 min, then the LLM only when there's new chat.**
+
+Stage 1 is the **tick**: pure code, no LLM, no API cost. Every `harvest.interval_min` the scheduler runs one indexed SQL query comparing each topic's newest message with its harvest cursor:
+
+```sql
+SELECT COALESCE(m.thread_id, 0)      AS thread_id,
+       COUNT(*)                      AS new_msgs,
+       MIN(m.created_at)             AS oldest_new,
+       MAX(m.id)                     AS newest_id
+FROM messages m
+LEFT JOIN topic_harvest h
+       ON h.chat_id = m.chat_id AND h.thread_id = COALESCE(m.thread_id, 0)
+WHERE m.chat_id = :group_chat_id
+  AND m.role = 'user'
+  AND COALESCE(m.thread_id, 0) <> :answer_topic_id
+  AND m.id > COALESCE(h.last_msg_id, 0)
+GROUP BY COALESCE(m.thread_id, 0);
 ```
-every harvest.interval_min (scheduler):
-  for each topic ≠ answer topic with unharvested messages (cursor in topic_harvest):
-    skip if < min_new_messages and oldest unharvested < 6 h
+
+- **No rows → done.** Nothing is sent anywhere. This is the normal case on quiet days and costs a few milliseconds.
+- A topic qualifies for stage 2 only if `new_msgs ≥ harvest.min_new_messages` **or** `oldest_new` is older than 6 h (so a few stray messages are still picked up eventually).
+- The tick records its result (`last_tick_at`, qualifying topics) in `topic_harvest` / logs, so the dashboard can show "last checked 12:30, nothing new" vs. "harvested #Food, 23 messages".
+
+Stage 2 is the **LLM harvest**, only for qualifying topics:
+
+```
+for each qualifying topic:
     window the new messages (same windowing as import §15.3, plus ~10 messages of prior context)
-    one Haiku-tier call (models.harvest, purpose='harvest'), same JSON schema as import extraction:
+    one Haiku-tier call (models.harvest, purpose='harvest'), same JSON schema and safe-topic rules as import extraction (§15.3.1, §15.4):
       facts     → propose_memory (inbox; auto_approve respected), source: topic:<name>/msg:<id>
-      decisions → recorded as decisions(source='observed', status='accepted') when they map to an
+      episodes (chosen) → decisions(source='observed', status='accepted') when they map to an
                   EXISTING category/alias; unknown categories are not created (avoids sprawl) and are
                   shown as suggestions in the inbox instead
       options   → suggestions in the inbox (not added automatically)
@@ -844,7 +888,7 @@ every harvest.interval_min (scheduler):
 
 - Uses the same **topic allowlist** as the import (§15.4): food & drink, places, entertainment, activities, shopping preferences, routines, dietary restrictions/allergies. Health beyond diet, finances, work and relationship/intimate content are never extracted.
 - Pre-M4 group rows (no `thread_id`) are treated as one "unknown topic" and harvested once like any other.
-- Cost: Haiku-tier, a handful of calls per day for a couple's group, so cents. Counted in `usage` and budget caps; when the budget hits 80%, the harvester pauses before anything user-facing degrades.
+- Cost: zero when the group is quiet (the tick is code only); otherwise Haiku-tier, a handful of calls per day for a couple's group, so cents. Counted in `usage` and budget caps; when the budget hits 80%, the harvester pauses before anything user-facing degrades.
 - The dashboard Ambient page shows harvester runs (topic, messages processed, items proposed).
 
 #### Data model (M4 migration)
@@ -866,7 +910,8 @@ CREATE TABLE topic_harvest (
   chat_id         INTEGER NOT NULL,
   thread_id       INTEGER NOT NULL,      -- 0 = pre-M4 'unknown topic'
   last_msg_id     INTEGER NOT NULL,      -- messages.id cursor
-  last_run_at     TEXT,
+  last_run_at     TEXT,                  -- last LLM harvest
+  last_tick_at    TEXT,                  -- last code-only check
   PRIMARY KEY (chat_id, thread_id)
 );
 -- usage.purpose gains 'harvest'; decisions.source gains 'observed'
@@ -911,6 +956,7 @@ All settings are read from SQLite on each request, so changes apply instantly wi
 | Strangers using the bot / burning API credit | Telegram ID allowlist enforced before any processing. |
 | Dashboard access | LAN-only bind, password + session, CSRF, no default credentials. |
 | Secrets | `.env` file readable only by container user; never logged; never shown in dashboard. |
+| Bot memory/state leaking into the code repo | Memory (vault), the SQLite DB and its WAL/SHM, the model cache, backups and imports live under `/data`, which on the NAS is outside the repo. Belt and braces: `.gitignore` ignores them by file shape wherever `TYKEE_DATA_DIR` points (`*.db*`, `vault/`, `models--*/`, `*.onnx`, `**/imports/*.json\|zip`), `.dockerignore` keeps them out of the image, `deploy.sh` refuses to start if the data dir is inside the repo and not ignored, and CI fails any PR that tracks such a file (§14.5). The vault's own nightly git commit (§14.2) is a separate local repo with **no remote**. |
 | Prompt injection via notes / user text | Tools are narrow; `write_note` path-restricted to vault folders; pinned notes immutable implicitly; no shell tools. The only network access is Anthropic's server-side web search/fetch (M7). |
 | Prompt injection / bad data via web content (M7) | Web results treated as untrusted data; web-sourced memories always require human approval in the inbox; web tools only on the orchestrator call; optional domain allow/block lists; daily search cap (§7.5). |
 | Path traversal in note paths | Resolve and enforce `vault_root in path.parents`; reject symlinks. |
@@ -996,6 +1042,21 @@ The vector/FTS index is in the DB backup, but can always be rebuilt from the vau
 | Corrupt/missing index | `System → Reindex` drops index tables and rebuilds from vault. |
 | NAS reboot | `restart: unless-stopped`; startup reconcile. |
 
+### 14.5 CI and deploying
+
+**CI** (`.github/workflows/ci.yml`, on every pull request and on pushes to `main`):
+
+| Job | What |
+|---|---|
+| lint · types · tests | `ruff check`, `ruff format --check`, `mypy --strict`, `pytest` (offline unit tests; `-m integration` stays opt-in), in `ghcr.io/astral-sh/uv:python3.12-bookworm-slim`, the same image `make check` uses, so local and CI results match (its Python allows loading `sqlite-vec`) |
+| shellcheck | `deploy.sh` |
+| no bot data committed | fails if any tracked path looks like a DB, vault, model file or `.env` |
+| docker build | `linux/amd64` image build (includes baking the embedding model), after the checks pass; layer cache in GitHub Actions; nothing is pushed |
+
+No secrets are used: unit tests run with fakes and no API key. There's no deploy from CI; the NAS is LAN-only.
+
+**Deploying** (`deploy.sh`, on the NAS): `./deploy.sh [branch]` → pull (optionally switch branch) → check `.env` (token, allowlist), data dir ownership (uid 1000) and that the data dir isn't inside the repo un-ignored → `docker compose build` → `up -d` → wait for the `polling` log line; on a startup error it prints the logs and the rollback command (`./deploy.sh <previous commit>`).
+
 ---
 
 ## 15. Bootstrap import (past 6 months of chat history)
@@ -1072,19 +1133,21 @@ windowing                                                         import_windows
   │  split on gaps > 2 h or ~6k tokens · lines: "[2026-04-01 19:02] jack: ..."
   ▼
 EXTRACT (map) – Opus-tier via Message Batches API (async, ~50% cheaper)    → extracting
-  │  per window, JSON-schema output:
+  │  per window, JSON-schema output (safe-topic rules §15.4 applied here first):
+  │   episodes:  decision episodes, see §15.3.1
   │   facts:     [{owner, type, statement, quote, ts, confidence}]
-  │   decisions: [{category_phrase, choice, for_users, outcome: chosen|considered|rejected, ts}]
   │   options:   [{category_phrase, name, tags, sentiment: -1..1}]
+  │   skipped_out_of_scope: integer      (count only, never content)
   ▼
 CONSOLIDATE (reduce) – deterministic code + Opus-tier calls         → consolidating
-  │  1. categories: embed all category_phrases → cluster (cos ≥ 0.85) → one Opus call
-  │     names each cluster, writes description, proposes τ
+  │  1. categories: Opus reads ALL decision episodes and designs the category set
+  │     (§15.3.2); every episode is mapped to a category or marked unmapped
   │  2. options: normalise names (casefold + rapidfuzz ≥ 90) within category;
   │     mean sentiment → suggested base_weight / per-user pref multiplier
   │  3. facts: group by owner, cluster by embedding → one Opus call per cluster merges
   │     into note sections; newer evidence wins conflicts; drop singletons with confidence < 0.6
-  │  4. decisions: map to consolidated categories, keep original timestamps
+  │  4. decisions: chosen episodes → decisions under their Opus-assigned category,
+  │     original timestamps kept; undecided/abandoned episodes kept as evidence only
   ▼
 REVIEW (dashboard → Import → job)                                  → review
   │  grouped by kind; every item shows evidence quotes + dates; edit / approve / reject;
@@ -1100,11 +1163,78 @@ APPLY                                                              → done
 
 **Why imported decisions matter:** they seed the recency penalty and preference multipliers from day one. Without them, the bot would happily suggest what you ate yesterday.
 
+#### 15.3.1 Decision episodes (extraction)
+
+The extractor doesn't just look for final choices. It finds every **decision episode**: a stretch of conversation where you two discussed and made (or failed to make) a choice, such as "what to eat tonight", "which movie", "where to go Saturday", "which sofa to buy".
+
+```json
+{
+  "episode_id": "w12-e3",
+  "summary": "Deciding dinner on Friday; Jack wanted spicy, partner wanted something light",
+  "category_phrase": "dinner",            // the kind of decision, in the chat's own words if possible
+  "phrases_seen": ["makan where", "dinner", "晚餐吃什么"],
+  "for_users": "both",                     // jack | partner | both
+  "options_considered": [
+    {"name": "Thai basil chicken", "by": "jack", "stance": "proposed"},
+    {"name": "Yong tau foo", "by": "partner", "stance": "proposed"},
+    {"name": "Mala", "by": "partner", "stance": "rejected", "reason": "too heavy"}
+  ],
+  "outcome": "chosen",                     // chosen | undecided | abandoned
+  "choice": "Yong tau foo",
+  "reasons": ["wanted something light", "near the MRT"],
+  "ts_start": "2026-05-02T18:40:00+08:00",
+  "ts_end": "2026-05-02T19:05:00+08:00",
+  "quotes": ["eh not mala again lah", "ok ytf"],
+  "confidence": 0.86
+}
+```
+
+- Episodes can span window boundaries; windows overlap by ~10 messages and consolidation de-duplicates episodes with the same category phrase, overlapping time range and same choice.
+- Rejected options and reasons are kept, because they become option sentiment and memory facts ("partner finds mala too heavy on weekdays").
+
+#### 15.3.2 Category creation by Opus (consolidation step 1)
+
+Categories for the import are **designed by Opus from the episodes**, not by embedding clustering. Embeddings proved unreliable for telling category phrasings apart (§8.1, v1.9).
+
+1. Code builds a compact episode list, one line each: `id | date | category_phrase | phrases_seen | summary | options | outcome/choice`. Six months is expected to be hundreds to low thousands of episodes, which fits a single Opus call. If it doesn't fit the token budget, it's split by month and a final Opus pass merges the partial taxonomies.
+2. One Opus call (`models.import_consolidate`, structured JSON output) returns:
+   ```json
+   {
+     "categories": [
+       {"slug": "dinner", "display_name": "Dinner", "description": "What to eat for dinner, eat out or delivery",
+        "recency_tau_days": 3, "default_n": 1, "allow_generated": true,
+        "aliases": ["makan where", "dinner", "晚餐", "what to eat tonight"],
+        "episode_ids": ["w12-e3", "..."]}
+     ],
+     "unmapped": [{"episode_id": "w40-e1", "why": "one-off, no recurring pattern"}]
+   }
+   ```
+3. **Rules given to Opus:**
+   - A category = a **recurring kind of decision** you two actually make. Granularity follows how you decide: split "lunch" from "dinner" only if they're decided differently; keep "weekend activity" as one category unless the episodes clearly show distinct kinds.
+   - Minimum support: at least 3 episodes, or 2 with a chosen outcome. Anything below folds into a broader category or goes to `unmapped`.
+   - Aim for 5–25 categories; no near-duplicates.
+   - Aliases include the actual phrasings seen, including Singlish and Chinese, so the live resolver (§8.1) hits them deterministically from day one.
+   - τ from the observed cadence (e.g. ate the same thing at most every N days), within the typical ranges in §8.1.
+   - **Never create a category in an excluded domain (§15.4)**, even if episodes slipped through extraction; such episodes go to `unmapped` with `why: "out_of_scope"` and are discarded.
+4. Code validates the result: unique slugs, every episode either mapped exactly once or unmapped, τ clamped to [0.5, 365], aliases normalised as in §8.1, and aliases that collide across categories dropped from both and flagged for review.
+5. Options and chosen decisions are then attached to these categories (steps 2 and 4 of consolidation).
+
+**Review:** the Categories tab is reviewed **first**. Each proposed category shows its episode count, a few sample episodes with quotes and dates, proposed τ and aliases. You can approve, rename, edit τ/aliases, **merge** two proposals, or reject. Rejecting a category drops its decisions and options from the apply step; its facts remain reviewable separately. Unmapped episodes are listed for information and can be assigned to a category by hand.
+
 ### 15.4 Extraction scope (privacy)
 
-The extraction prompt has an explicit **topic allowlist**: food & drink, places, entertainment, activities, shopping preferences, routines/schedules, dietary restrictions & allergies.
+**Safe-topic rules** apply to everything the import (and the memory harvester, §10.4) produces: episodes, categories, options, facts and decisions.
 
-It explicitly **excludes**: health beyond diet/allergies, finances, work matters, relationship disagreements and intimate content, and personal details about third parties. Out-of-scope content is never written to the vault, even if it appears in a window.
+| Allowed | Skipped |
+|---|---|
+| Food & drink, places, entertainment, activities, outings & trips, shopping preferences (what to buy, brands, styles), routines/schedules, dietary restrictions & allergies | **Health** (conditions, medication, doctor visits, mental health; only allergies/diet survive) · **Money** (salaries, budgets, savings, investments, debts, bills, price negotiations) · **Work** (jobs, colleagues, office matters) · **Relationship talk** (disagreements, feelings, intimacy, family conflicts) · personal details about third parties |
+
+Enforced in three layers:
+1. **Extraction (Opus):** the prompt lists both columns; out-of-scope discussions produce no episode, fact or option. Only a count (`skipped_out_of_scope`) is returned, never the content.
+2. **Category creation (Opus):** no category may be created in a skipped domain. Any episode that slipped through is sent to `unmapped` as `out_of_scope` and discarded (§15.3.2).
+3. **Review (you):** anything that still looks out of scope is rejected in the dashboard. The job summary shows how many windows had out-of-scope content skipped.
+
+Edge cases: a dinner choice that mentions price ("cheaper one lah") keeps the choice but drops the money detail; "which phone to buy" is shopping and allowed, but budgets or amounts are not stored. Out-of-scope content is never written to the vault or the DB, even if it appears in a window.
 
 Both people's raw messages are sent to the Anthropic API during extraction, so both should agree to the import before it runs. The dashboard enforces this with a required consent checkbox (§15.2 step ⑤), recorded in `import_jobs.consent_at`.
 
@@ -1126,7 +1256,7 @@ Both people's raw messages are sent to the Anthropic API during extraction, so b
 | M2b | Ambient participation: debounce, stage-1 rules, judge call, cooldown/caps, `/quiet`, `ambient_log`, rolling chat summaries | Bot steps in on "idk you decide" and stays silent through small talk. |
 | M3 | Second brain: NoteStore, chunking, `Embedder` (fastembed, model baked into image, int8 vs fp32 eval per §6.9), FTS5 + sqlite-vec, hybrid retrieval, pinned notes, memory tools, inbox, decision log mirror | "Remember I hate coriander" changes future picks. |
 | M4 | Dashboard: auth, all pages in §11 (incl. category merge), usage & budget UI (enforcement itself lands in M1); **forum topics (§10.4)**: read all topics with `thread_id`, answer only in the dashboard-selected answer topic (dropdown + `/settopic`), ignored-topic list, `forum_topics` name tracking, `send_to_group()` helper, off-topic mention handling, **memory harvester** for other topics | All behaviour controllable without touching code. Tykee learns from every topic but only speaks in the answer topic; switching the answer topic in the dashboard takes effect immediately; a preference mentioned in another topic shows up in the memory inbox. |
-| M5 | Bootstrap import: dashboard upload wizard (§15.2), Telegram JSON/zip parser (single chat + full account), windowing, batch extraction, consolidation, review UI, apply | 6 months of history reviewed and applied; bot knows both users on day one. |
+| M5 | Bootstrap import: dashboard upload wizard (§15.2), Telegram JSON/zip parser (single chat + full account), windowing, batch extraction, consolidation, review UI, apply; decision-episode extraction (§15.3.1), **Opus-designed categories** with review/merge (§15.3.2), three-layer safe-topic enforcement (§15.4) | 6 months of history reviewed and applied; bot knows both users on day one. Categories reflect the decisions you actually discussed; nothing about health, money, work or relationship talk is stored. |
 | M6 | Scheduled nudges (optional), backups, healthcheck, polish, runbook | Runs unattended for 2 weeks. |
 | M7 | Web access (§7.5): web search + fetch server tools on the orchestrator call, `web.*` settings + dashboard toggles, persona rules, web-sourced memory → inbox only, usage/cost recording of searches & fetches, daily cap + budget-based disable, error fallback | "Is that new ramen place in Tanjong Pagar any good?" gets a short, cited answer; a web fact never lands in the vault without approval; tests pass offline with web tools faked. |
 
@@ -1147,7 +1277,7 @@ Deferred / later: voice notes (requires separate STT), photo input (fridge conte
 | Admin visibility | Admin sees all conversations and memories, see §12. |
 | Chat mode | Both DMs and one shared group, see §10. |
 | Categories | Inferred and created dynamically, with resolver + merge, see §8.1. |
-| Bootstrap | From the past 6 months of chat history, see §15. |
+| Bootstrap | From the past 6 months of chat history, see §15. Opus finds decision episodes and designs the category set from them; safe-topic rules skip health, money, work and relationship talk (§15.3–15.4). |
 | LLM provider | Claude API (API key) for all runtime LLM calls; Claude Code for development only, see §7.0. |
 | Web access | Agent with Anthropic server-side web search/fetch, orchestrator only, capped, web-sourced memories need approval. Milestone M7, see §7.5. |
 | Import source | Telegram Desktop JSON export, uploaded via the dashboard Import wizard; chats chosen at upload time, see §15.1–15.2. |

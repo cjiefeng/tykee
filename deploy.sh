@@ -58,6 +58,12 @@ if [[ "$OWNER" != "1000" ]]; then
     fail "$DATA_DIR is owned by uid $OWNER, but the container runs as uid 1000. Run: sudo chown 1000:1000 $DATA_DIR"
   fi
 fi
+# Memory must never end up in git: if the data dir lives inside this repo, it has to be ignored.
+DATA_ABS="$(cd "$DATA_DIR" && pwd -P)"
+if [[ "$DATA_ABS/" == "$(pwd -P)/"* ]] \
+  && ! { git check-ignore -q "$DATA_ABS/bot.db" && git check-ignore -q "$DATA_ABS/vault/people/x.md"; }; then
+  fail "$DATA_DIR is inside the repo but not git-ignored; add it to .gitignore or move it outside the repo"
+fi
 echo "    $DATA_DIR OK"
 
 # --- 3. build ----------------------------------------------------------------------------------

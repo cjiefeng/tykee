@@ -10,12 +10,14 @@ import json
 import logging
 from collections.abc import Sequence
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Literal
 from zoneinfo import ZoneInfo
 
 from anthropic.types import ToolParam
 from pydantic import BaseModel, Field, ValidationError
 
+from app.brain.memory import MemoryPolicyError, MemoryService
+from app.brain.store import NoteError
 from app.db.repos.users import UserRecord
 from app.decisions.categories import Category
 from app.decisions.engine import ExtraCandidate, PickRequest
@@ -64,6 +66,34 @@ class AddOptionIn(BaseModel):
 class RecentDecisionsIn(BaseModel):
     category: str
     days: float = Field(default=14, gt=0, le=365)
+
+
+class SearchMemoryIn(BaseModel):
+    query: str = Field(min_length=1, max_length=300)
+    scope: Literal["me", "partner", "both", "shared"] | None = None
+    k: int | None = Field(default=None, ge=1, le=12)
+
+
+class ReadNoteIn(BaseModel):
+    path: str
+
+
+class WriteNoteIn(BaseModel):
+    path: str
+    mode: Literal["create", "append", "replace_section", "replace"]
+    content: str = Field(min_length=1, max_length=4000)
+    heading: str | None = None
+    title: str | None = None
+    tags: list[str] = Field(default_factory=list)
+    add_avoid_tags: list[str] = Field(default_factory=list)
+    remove_avoid_tags: list[str] = Field(default_factory=list)
+
+
+class ProposeMemoryIn(BaseModel):
+    owner: str
+    content: str = Field(min_length=1, max_length=1000)
+    reason: str = Field(min_length=1, max_length=300)
+    topic: str = Field(min_length=1, max_length=60)
 
 
 # --- schemas ---------------------------------------------------------------------------------
@@ -215,6 +245,97 @@ def tool_definitions(user_slugs: Sequence[str]) -> list[ToolParam]:
     ]
 
 
+def memory_tool_definitions(user_slugs: Sequence[str]) -> list[ToolParam]:
+    owners = [*user_slugs, "shared"]
+    return [
+        {
+            "name": "search_memory",
+            "description": (
+                "Search the second brain (notes about the users, places, preferences). Write the "
+                "query in plain English plus any original local terms, e.g. 'takeaway food "
+                "tapao' or 'dessert 甜品'. Use before suggesting things where past preferences "
+                "matter."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string"},
+                    "scope": {
+                        "type": "string",
+                        "enum": ["me", "partner", "both", "shared"],
+                        "description": "Whose notes: the asker's, the other person's, both, or "
+                        "shared only. Omit for the chat default.",
+                    },
+                    "k": {"type": "integer", "minimum": 1, "maximum": 12},
+                },
+                "required": ["query"],
+            },
+        },
+        {
+            "name": "read_note",
+            "description": "Read a whole note by path (from search results or pinned notes). "
+            "Always read before changing a note.",
+            "input_schema": {
+                "type": "object",
+                "properties": {"path": {"type": "string"}},
+                "required": ["path"],
+            },
+        },
+        {
+            "name": "write_note",
+            "description": (
+                "Save something the user EXPLICITLY asked you to remember or forget. Paths: "
+                "people/<user>.md (profile + hard constraints), memories/<user>/<topic>.md, "
+                "shared/household.md, shared/places/<name>.md, shared/topics/<name>.md. Modes: "
+                "create (new note), append (optionally under a heading), replace_section "
+                "(rewrite one section, e.g. to fix a contradiction), replace (rewrite the "
+                "whole body, e.g. to forget a line). For allergies and strong dislikes, also "
+                "set add_avoid_tags on people/<user>.md, e.g. ['contains:coriander'], so picks "
+                "exclude them automatically."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string"},
+                    "mode": {
+                        "type": "string",
+                        "enum": ["create", "append", "replace_section", "replace"],
+                    },
+                    "content": {"type": "string", "description": "Markdown, plain English."},
+                    "heading": {"type": "string"},
+                    "title": {"type": "string", "description": "Title for a new note."},
+                    "tags": _TAGS,
+                    "add_avoid_tags": _TAGS,
+                    "remove_avoid_tags": _TAGS,
+                },
+                "required": ["path", "mode", "content"],
+            },
+        },
+        {
+            "name": "propose_memory",
+            "description": (
+                "Suggest remembering a durable fact the user did NOT explicitly ask you to save "
+                "(e.g. 'I'm off seafood this month' said in passing). It goes to an approval "
+                "inbox, not straight into memory. Don't propose trivia, one-off moods, or "
+                "anything about health beyond diet, finances, work or the relationship."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "owner": {"type": "string", "enum": owners},
+                    "content": {"type": "string", "description": "One plain-English sentence."},
+                    "reason": {"type": "string", "description": "What in the chat suggested it."},
+                    "topic": {
+                        "type": "string",
+                        "description": "Short note name to file it under, e.g. 'food', 'drinks'.",
+                    },
+                },
+                "required": ["owner", "content", "reason", "topic"],
+            },
+        },
+    ]
+
+
 # --- router ----------------------------------------------------------------------------------
 
 
@@ -224,6 +345,8 @@ class TurnContext:
     actor: UserRecord
     default_for_users: str
     tz: ZoneInfo
+    is_group: bool = False
+    source: str = ""  # provenance for notes written this turn, e.g. telegram:<chat_id>
     last_picks: list[tuple[int, str]] = field(default_factory=list)  # (decision_id, name)
 
 
@@ -242,11 +365,15 @@ def _err(message: str) -> ToolOutcome:
 
 
 class ToolRouter:
-    def __init__(self, decisions: DecisionService) -> None:
+    def __init__(self, decisions: DecisionService, memory: MemoryService | None = None) -> None:
         self._d = decisions
+        self._m = memory
 
     def definitions(self) -> list[ToolParam]:
-        return tool_definitions(self._d.user_slugs)
+        tools = tool_definitions(self._d.user_slugs)
+        if self._m is not None:
+            tools += memory_tool_definitions(self._d.user_slugs)
+        return tools
 
     async def execute(self, name: str, raw: dict[str, Any], ctx: TurnContext) -> ToolOutcome:
         handler = {
@@ -255,6 +382,16 @@ class ToolRouter:
             "list_options": self._list,
             "add_option": self._add,
             "recent_decisions": self._recent,
+            **(
+                {
+                    "search_memory": self._search_memory,
+                    "read_note": self._read_note,
+                    "write_note": self._write_note,
+                    "propose_memory": self._propose_memory,
+                }
+                if self._m is not None
+                else {}
+            ),
         }.get(name)
         if handler is None:
             return _err(f"unknown tool {name!r}")
@@ -262,6 +399,8 @@ class ToolRouter:
             return await handler(raw, ctx)
         except ValidationError as e:
             return _err(f"invalid input: {e.errors(include_url=False)}")
+        except (MemoryPolicyError, NoteError) as e:
+            return _err(str(e))
 
     async def _category(self, name: str) -> Category | None:
         return await self._d.lookup(name)
@@ -325,6 +464,7 @@ class ToolRouter:
         )
         result = await self._d.pick(cat, req, asked_by=ctx.actor.id, chat_id=ctx.chat_id)
         ctx.last_picks = [(p.decision_id, p.name) for p in result.picks]
+        constraints = list(result.hard_excluded)
         if not result.picks:
             return _ok(
                 {
@@ -339,6 +479,7 @@ class ToolRouter:
                 "for_users": for_users,
                 "picks": [{"name": p.name, "tags": list(p.tags)} for p in result.picks],
                 "candidates_considered": result.considered,
+                **({"excluded_by_constraints": constraints} if constraints else {}),
                 "note": (
                     "Buttons to accept, reroll or reject are attached to your reply automatically."
                 ),
@@ -386,5 +527,75 @@ class ToolRouter:
                     }
                     for r in rows
                 ],
+            }
+        )
+
+    # --- memory tools (§6.5-6.7) -------------------------------------------------------------
+
+    async def _search_memory(self, raw: dict[str, Any], ctx: TurnContext) -> ToolOutcome:
+        assert self._m is not None
+        a = SearchMemoryIn.model_validate(raw)
+        scope = a.scope or ("both" if ctx.is_group else "me")
+        hits = await self._m.search(a.query, asker=ctx.actor.slug, scope=scope, k=a.k)
+        return _ok(
+            {
+                "scope": scope,
+                "results": [
+                    {
+                        "path": h.path,
+                        "title": h.title,
+                        "heading": h.heading,
+                        "snippet": h.snippet,
+                        "owner": h.owner,
+                        **({"via": "linked note"} if h.via == "link" else {}),
+                    }
+                    for h in hits
+                ],
+            }
+        )
+
+    async def _read_note(self, raw: dict[str, Any], ctx: TurnContext) -> ToolOutcome:
+        assert self._m is not None
+        a = ReadNoteIn.model_validate(raw)
+        rel, note = await self._m.read(a.path, asker=ctx.actor.slug, is_group=ctx.is_group)
+        return _ok(
+            {
+                "path": rel,
+                "owner": note.owner,
+                "pinned": note.pinned,
+                "tags": note.meta.get("tags") or [],
+                "avoid_tags": note.avoid_tags,
+                "body": note.body,
+            }
+        )
+
+    async def _write_note(self, raw: dict[str, Any], ctx: TurnContext) -> ToolOutcome:
+        assert self._m is not None
+        a = WriteNoteIn.model_validate(raw)
+        result = await self._m.write(
+            a.path,
+            mode=a.mode,
+            content=a.content,
+            heading=a.heading,
+            title=a.title,
+            tags=a.tags,
+            add_avoid_tags=a.add_avoid_tags,
+            remove_avoid_tags=a.remove_avoid_tags,
+            source=ctx.source,
+        )
+        return _ok({"saved": result.path, "created": result.created})
+
+    async def _propose_memory(self, raw: dict[str, Any], ctx: TurnContext) -> ToolOutcome:
+        assert self._m is not None
+        a = ProposeMemoryIn.model_validate(raw)
+        item = await self._m.propose(
+            owner=a.owner, content=a.content, reason=a.reason, topic=a.topic, source=ctx.source
+        )
+        return _ok(
+            {
+                "status": item.status,
+                "note": "Saved."
+                if item.status == "approved"
+                else "Queued for approval; don't tell the user it's remembered yet.",
             }
         )

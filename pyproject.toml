@@ -6,6 +6,9 @@ requires-python = ">=3.12,<3.13"
 dependencies = [
   "aiogram>=3.13,<4",
   "anthropic>=1.11,<2",
+  "fastembed>=0.8,<0.9",
+  "numpy>=2",
+  "python-frontmatter>=1.1",
   "pydantic>=2.7",
   "pydantic-settings>=2.4",
   "sqlite-vec>=0.1.6",
@@ -34,6 +37,9 @@ target-version = "py312"
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "ASYNC", "SIM", "RUF"]
 
+[tool.ruff.lint.per-file-ignores]
+"scripts/eval_data.py" = ["E501", "RUF001"]  # fixture text: one note per line, real Chinese punctuation
+
 [tool.mypy]
 python_version = "3.12"
 strict = true
@@ -41,7 +47,7 @@ files = ["app"]
 plugins = ["pydantic.mypy"]
 
 [[tool.mypy.overrides]]
-module = ["sqlite_vec"]
+module = ["sqlite_vec", "frontmatter", "fastembed", "fastembed.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]

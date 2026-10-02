@@ -1,5 +1,15 @@
 .env
 data/
+# Bot memory and state must never be committed, wherever TYKEE_DATA_DIR points:
+# SQLite database (+ WAL/SHM), the vault, model cache, backups and imports.
+*.db
+*.db-wal
+*.db-shm
+vault/
+models--*/
+*.onnx
+**/imports/*.json
+**/imports/*.zip
 .venv/
 __pycache__/
 *.pyc

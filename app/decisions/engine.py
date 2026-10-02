@@ -10,7 +10,7 @@ import json
 import math
 import random
 import sqlite3
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta
 
@@ -75,6 +75,7 @@ class PickResult:
     picks: list[Pick]
     considered: int
     weights: dict[str, float]  # candidate key → final weight (for tests and debugging)
+    hard_excluded: tuple[str, ...] = ()  # avoid_tags applied from people/<slug>.md (§8.2)
 
 
 # --- pure math -------------------------------------------------------------------------------
@@ -114,8 +115,13 @@ def owner_scope(for_users: str, all_slugs: Sequence[str]) -> list[str]:
 
 
 def _candidates(
-    conn: sqlite3.Connection, category: Category, req: PickRequest, owners: Sequence[str]
+    conn: sqlite3.Connection,
+    category: Category,
+    req: PickRequest,
+    owners: Sequence[str],
+    hard_exclude: Collection[str] = (),
 ) -> list[Candidate]:
+    exclude = [*req.exclude_tags, *hard_exclude]
     rows = conn.execute(
         f"SELECT id, name, tags_json, base_weight, owner, active FROM options "
         f"WHERE category_id = ? AND owner IN ({','.join('?' * len(owners))})",
@@ -126,7 +132,7 @@ def _candidates(
         for r in rows
         if r["active"]
     ]
-    out = [c for c in out if tags_ok(c.tags, req.include_tags, req.exclude_tags)]
+    out = [c for c in out if tags_ok(c.tags, req.include_tags, exclude)]
     if category.allow_generated and req.extra_candidates:
         known = {
             r["name"].casefold()
@@ -134,11 +140,7 @@ def _candidates(
         }
         for x in req.extra_candidates:
             name = x.name.strip()
-            if (
-                name
-                and name.casefold() not in known
-                and tags_ok(x.tags, req.include_tags, req.exclude_tags)
-            ):
+            if name and name.casefold() not in known and tags_ok(x.tags, req.include_tags, exclude):
                 known.add(name.casefold())
                 out.append(Candidate(name, tuple(x.tags)))
     return out
@@ -205,6 +207,7 @@ def pick(
     now: datetime,
     session_hours: float,
     rng: random.Random | None = None,
+    hard_exclude: Collection[str] = (),
 ) -> PickResult:
     """Weighted pick; inserts one ``decisions`` row (status 'suggested') per pick."""
     owners = owner_scope(req.for_users, list(users_by_slug))
@@ -215,7 +218,7 @@ def pick(
         if req.for_users in users_by_slug
         else []
     )
-    cands = _candidates(conn, category, req, owners)
+    cands = _candidates(conn, category, req, owners, hard_exclude)
     excluded = _session_excluded(
         conn, category.id, chat_id, to_sql(now - timedelta(hours=session_hours))
     )
@@ -258,4 +261,5 @@ def pick(
         picks=picks,
         considered=len(cands),
         weights={c.key: w for c, w in zip(cands, weights, strict=True)},
+        hard_excluded=tuple(sorted(hard_exclude)),
     )

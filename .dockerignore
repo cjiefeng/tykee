@@ -1,6 +1,12 @@
 .git
 .venv
 data
+**/*.db
+**/*.db-wal
+**/*.db-shm
+**/vault
+**/models--*
+**/imports
 .env
 **/__pycache__
 .mypy_cache

@@ -6,7 +6,7 @@ from __future__ import annotations
 import json
 import random
 import sqlite3
-from collections.abc import Callable, Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -47,7 +47,10 @@ class DecisionService:
         users: Sequence[UserRecord],
         clock: Callable[[], datetime] = utcnow,
         rng: random.Random | None = None,
+        constraints: Callable[[str], Awaitable[set[str]]] | None = None,
     ) -> None:
+        """``constraints(for_users)`` returns the hard avoid_tags for those users (§8.2)."""
+        self._constraints = constraints
         self._db = db
         self._settings = settings
         self._users_by_slug = {u.slug: u.id for u in users}
@@ -91,6 +94,7 @@ class DecisionService:
     ) -> PickResult:
         s = await self._settings.load()
         now = self._clock()
+        hard = await self._constraints(req.for_users) if self._constraints else set()
 
         def _run(conn: sqlite3.Connection) -> PickResult:
             current = cats.get_by_id(conn, category.id) or category
@@ -104,6 +108,7 @@ class DecisionService:
                 now=now,
                 session_hours=s.decisions_session_hours,
                 rng=self._rng,
+                hard_exclude=hard,
             )
 
         return await self._db.write(_run)
@@ -210,3 +215,14 @@ class DecisionService:
             ).fetchall()
         )
         return [(r[0], r[1], r[2]) for r in rows]
+
+    async def describe(self, decision_id: int) -> tuple[str, str, str] | None:
+        """(category display name, choice, for_users) for the decision log mirror."""
+        row = await self._db.read(
+            lambda c: c.execute(
+                "SELECT c.display_name, d.choice_text, d.for_users FROM decisions d "
+                "JOIN categories c ON c.id = d.category_id WHERE d.id = ?",
+                (decision_id,),
+            ).fetchone()
+        )
+        return (row[0], row[1], row[2]) if row else None

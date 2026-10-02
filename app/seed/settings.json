@@ -23,5 +23,9 @@
   "ambient.negative_window_min": 15,
   "ambient.negative_phrases": ["not now", "didn't ask", "didnt ask", "nobody asked", "no one asked", "not helpful"],
   "ambient.mute_phrases": ["bot shh", "shh bot", "bot keep quiet", "bot be quiet", "bot quiet", "tykee shh", "tykee keep quiet", "tykee be quiet"],
-  "summary.batch": 20
+  "summary.batch": 20,
+  "embedding.precision": "int8",
+  "memory.auto_approve": false,
+  "memory.search_k": 6,
+  "memory.pinned_max_chars": 6000
 }

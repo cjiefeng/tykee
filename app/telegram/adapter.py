@@ -13,6 +13,7 @@ from aiogram.types import CallbackQuery, Message, MessageReactionUpdated, Reacti
 
 from app.ambient.phrases import parse_duration
 from app.ambient.service import AmbientService
+from app.brain.memory import MemoryService
 from app.db.database import Database
 from app.db.repos import messages as messages_repo
 from app.db.repos.users import UserRecord
@@ -33,7 +34,12 @@ from app.telegram.addressing import (
     stored_text,
 )
 from app.telegram.gateway import ChatGateway
-from app.telegram.keyboards import decision_keyboard, parse_callback
+from app.telegram.keyboards import (
+    decision_keyboard,
+    inbox_keyboard,
+    parse_callback,
+    parse_inbox_callback,
+)
 from app.telegram.middleware import GROUP_TYPES
 
 log = logging.getLogger(__name__)
@@ -46,6 +52,9 @@ In the group, mention me or reply to one of my messages. In a DM, just talk to m
 Commands:
 /pick <category>: random pick from saved options (e.g. /pick dinner)
 /options <category>: list saved options
+/remember <fact>: save something to memory
+/forget <fact>: remove something from memory
+/inbox: review memories waiting for approval (admin)
 /quiet [2h]: in the group, don't chime in unprompted for a while (default 2h)
 /unquiet: allow chiming in again
 /help: this message"""
@@ -72,7 +81,9 @@ class TelegramAdapter:
         me: BotIdentity,
         users: Sequence[UserRecord],
         tz: ZoneInfo,
+        memory: MemoryService | None = None,
     ) -> None:
+        self._memory = memory
         self._ambient = ambient
         self._tz = tz
         ambient.responder = self.respond_unprompted
@@ -93,6 +104,10 @@ class TelegramAdapter:
         @router.callback_query(F.data.startswith("d:"))
         async def _on_callback(callback: CallbackQuery, actor: UserRecord) -> None:
             await self.handle_callback(callback, actor)
+
+        @router.callback_query(F.data.startswith("m:"))
+        async def _on_inbox_callback(callback: CallbackQuery, actor: UserRecord) -> None:
+            await self.handle_inbox_callback(callback, actor)
 
         @router.message_reaction()
         async def _on_reaction(reaction: MessageReactionUpdated, actor: UserRecord) -> None:
@@ -137,9 +152,10 @@ class TelegramAdapter:
         log.info("addressed", extra={"chat_id": chat_id, "user": actor.slug, "group": is_group})
         chat = ChatContext(chat_id, is_group)
         cmd = parse_command(msg.text, self._me.username)
-        if cmd is not None:
+        if cmd is not None and cmd.name not in ("remember", "forget"):
             await self._command(cmd, msg, chat, actor)
             return
+        # /remember and /forget go to Claude as-is; the rules tell it to use write_note.
         async with self._gateway.typing(chat_id):
             reply = await self._orchestrator.respond(chat, actor, text)
         await self._send(
@@ -193,6 +209,8 @@ class TelegramAdapter:
             await self._cmd_options(cmd.args, chat)
         elif cmd.name in ("quiet", "unquiet"):
             await self._cmd_quiet(cmd, chat)
+        elif cmd.name == "inbox":
+            await self._cmd_inbox(chat, actor)
         else:
             await self._send(chat.chat_id, HELP_TEXT, store=False)
 
@@ -262,6 +280,50 @@ class TelegramAdapter:
         until = await self._ambient.mute(chat.chat_id, duration)
         await self._send(chat.chat_id, self._quiet_text(until), store=False)
 
+    # --- memory inbox (§6.7) -------------------------------------------------------------------
+
+    async def _cmd_inbox(self, chat: ChatContext, actor: UserRecord) -> None:
+        if self._memory is None:
+            return
+        if not actor.is_admin:
+            await self._send(
+                chat.chat_id, "Only the admin can review the memory inbox.", store=False
+            )
+            return
+        items = await self._memory.pending()
+        if not items:
+            await self._send(chat.chat_id, "📥 Memory inbox is empty.", store=False)
+            return
+        total = await self._memory.pending_count()
+        for item in items:
+            text = f"📥 **{item.owner}** → {item.target_path}\n{item.content}"
+            if item.reason:
+                text += f"\n_why: {item.reason}_"
+            await self._gateway.send_text(chat.chat_id, text, keyboard=inbox_keyboard(item.id))
+        if total > len(items):
+            await self._send(
+                chat.chat_id,
+                f"…and {total - len(items)} more. Run /inbox again after these.",
+                store=False,
+            )
+
+    async def handle_inbox_callback(self, cb: CallbackQuery, actor: UserRecord) -> None:
+        parsed = parse_inbox_callback(cb.data)
+        if parsed is None or cb.message is None or self._memory is None:
+            await self._gateway.answer_callback(cb.id, "That button has expired.")
+            return
+        if not actor.is_admin:
+            await self._gateway.answer_callback(cb.id, "Only the admin can approve memories.")
+            return
+        item_id, approve = parsed
+        before = await self._memory.get(item_id)
+        if before is None or before.status != "pending":
+            await self._gateway.answer_callback(cb.id, "Already sorted 👍")
+        else:
+            await self._memory.decide(item_id, approve=approve, user_id=actor.id)
+            await self._gateway.answer_callback(cb.id, "Saved ✅" if approve else "Dropped ❌")
+        await self._gateway.set_keyboard(cb.message.chat.id, cb.message.message_id, None)
+
     # --- unprompted replies (§10.2) ------------------------------------------------------------
 
     async def respond_unprompted(
@@ -285,6 +347,20 @@ class TelegramAdapter:
 
     # --- button callbacks ----------------------------------------------------------------------
 
+    async def _mirror_decision(self, decision_id: int, actor: UserRecord) -> None:
+        """§8.4: human-readable log in vault/logs/ (the DB stays authoritative)."""
+        if self._memory is None:
+            return
+        info = await self._decisions.describe(decision_id)
+        if info is None:
+            return
+        category, choice, for_users = info
+        now = datetime.now(self._tz)
+        await self._memory.log_decision(
+            f"- {now:%H:%M} · {category} · **{choice}** · for {for_users}"
+            f" · ✅ by {actor.display_name}"
+        )
+
     async def handle_callback(self, cb: CallbackQuery, actor: UserRecord) -> None:
         parsed = parse_callback(cb.data)
         if parsed is None or cb.message is None:
@@ -303,6 +379,7 @@ class TelegramAdapter:
 
         if action == "accept":
             await self._gateway.answer_callback(cb.id, "Locked in ✅")
+            await self._mirror_decision(decision_id, actor)
             await self._send(chat_id, f"✅ **{fb.choice_text}** it is.", reply_to=message_id)
         elif action == "reject":
             await self._gateway.answer_callback(cb.id, "Noted, I'll suggest that less 👌")
