@@ -15,11 +15,13 @@ from app import inbox_appliers
 from app.backup import BackupService
 from app.dashboard.app import create_app
 from app.dashboard.core import DashboardDeps, hash_password
+from app.db.repos import usage as usage_repo
 from app.harvest import Harvester
 from app.importer.service import ImportService
 from app.nudges import NudgeService
 from app.settings import get_value, set_value
 from app.telegram.topics import KEY_ANSWER
+from app.timeutil import to_sql, utcnow
 from tests.conftest import GROUP_ID, TZ, Env, Stack, make_stack, seed_category, tg_message
 from tests.fakes.fake_batches import FakeBatches
 from tests.fakes.fake_llm import FakeLLMClient
@@ -297,6 +299,32 @@ async def test_persona_history_and_restore(dash: Dash, env: Env) -> None:
     assert history[-1]["text"] == original
     await dash.post("/behaviour/persona", {"persona": original})
     assert (await env.settings.load()).persona_system_prompt == original
+
+
+async def test_overview_shows_web_searches_against_the_daily_cap(dash: Dash, env: Env) -> None:
+    await dash.login()
+    page = (await dash.client.get("/")).text
+    assert "Web searches today" in page and "web on" in page
+
+    await env.db.write(lambda c: set_value(c, "web.daily_search_cap", 3))
+    row = usage_repo.UsageRow(
+        user_id=None,
+        purpose="chat",
+        chat_id=None,
+        import_job_id=None,
+        model="m",
+        input_tokens=0,
+        output_tokens=0,
+        cache_read_tokens=0,
+        cache_write_tokens=0,
+        cost_usd=0.0,
+        created_at=to_sql(utcnow()),
+        web_search_requests=3,
+    )
+    await env.db.write(lambda c: usage_repo.insert(c, row))
+    page = (await dash.client.get("/")).text
+    assert '<div class="big bad">3</div>' in page and "of 3" in page
+    assert "paused: daily search cap reached" in page
 
 
 async def test_web_settings(dash: Dash, env: Env) -> None:
