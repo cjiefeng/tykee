@@ -411,6 +411,10 @@ async def test_dm_decision_lands_in_the_decision_log(rig: Rig, env: Env) -> None
     assert inbox[0]["source"].startswith("reader:DM with Partner/msg:13")
     ch = (await rig.service.chats())[0]
     assert ch.last_harvest == "done: 1 decision, 1 fact" and ch.fetched_today == 3
+    logs = list((env.vault / "logs").rglob("*.md"))
+    assert len(logs) == 1 and "**Japanese** · for both · seen in DM with Partner" in (
+        logs[0].read_text(encoding="utf-8")
+    )
 
 
 async def test_reader_rows_never_leak_into_the_bot_dm(rig: Rig, env: Env) -> None:

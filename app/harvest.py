@@ -562,11 +562,12 @@ class Harvester:
             place = None
             if (pid := place_links.match_place(choice, marked)) is not None and self._places:
                 place = await self._places.get(pid)
+            at = _parse_ts(ep.ts, fallback_ts, self._tz)
             await self._decisions.record_observed(
                 category,
                 choice=place.name if place else choice,
                 for_users=for_users,
-                at=_parse_ts(ep.ts, fallback_ts, self._tz),
+                at=at,
                 # A reader chat's peer id can equal a bot DM's chat_id (§10.7): keep it out of
                 # per-chat session logic.
                 chat_id=None if reader else self._group_id(),
@@ -574,6 +575,11 @@ class Harvester:
             )
             if place is not None and self._places is not None:
                 await self._places.visit(place.id)
+            # §8.4 / §10.7: observed decisions go to the vault's decision log too.
+            await self._memory.log_decision(
+                f"- {at.astimezone(self._tz):%H:%M} · {category.display_name} · "
+                f"**{place.name if place else choice}** · for {for_users} · seen in {topic}"
+            )
             result.decisions += 1
 
         for opt in ex.options:
