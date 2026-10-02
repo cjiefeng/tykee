@@ -1,5 +1,5 @@
 {
-  "_comment": "Seed values for the settings table, inserted on startup for keys that don't exist yet. The only place model IDs and prices live outside the DB (design §7.0). Sourced from Anthropic docs, 2026-10-02. Prices are USD per million tokens; cache_write is the 5-minute TTL rate.",
+  "_comment": "Seed values for the settings table, inserted on startup for keys that don't exist yet. The only place model IDs and prices live outside the DB (design §7.0). Sourced from Anthropic docs, 2026-10-02. Prices are USD per million tokens; cache_write is the 5-minute TTL rate. pricing.web_search is USD per search ($10 per 1,000). web.tool_versions are the basic (no dynamic filtering) variants, which every current model incl. Haiku 4.5 accepts.",
   "models.default": "claude-haiku-4-5",
   "models.escalated": "claude-sonnet-5-5",
   "models.judge": "claude-haiku-4-5",
@@ -44,5 +44,15 @@
   "nudges.items": [],
   "backup.enabled": true,
   "backup.time": "03:00",
-  "backup.keep": 14
+  "backup.keep": 14,
+  "web.enabled": true,
+  "web.search_max_uses": 3,
+  "web.fetch_max_uses": 2,
+  "web.fetch_max_content_tokens": 4000,
+  "web.daily_search_cap": 50,
+  "web.user_location": {"type": "approximate", "city": "Singapore", "country": "SG", "timezone": "Asia/Singapore"},
+  "web.allowed_domains": [],
+  "web.blocked_domains": [],
+  "web.tool_versions": {"web_search": "web_search_20250305", "web_fetch": "web_fetch_20250910"},
+  "pricing.web_search": 0.01
 }

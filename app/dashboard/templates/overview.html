@@ -11,7 +11,7 @@
 <div class="grid">
   <div class="card"><h3>Spend today</h3>
     <div class="big {{ 'bad' if budget.daily_spent >= budget.daily_cap else ('warn' if budget.daily_spent >= warn * budget.daily_cap else '') }}">{{ spend.today | usd }}</div>
-    <div class="muted small">of {{ budget.daily_cap | usd }}, {{ spend.calls_today }} calls</div>{{ meter(budget.daily_spent, budget.daily_cap) }}</div>
+    <div class="muted small">of {{ budget.daily_cap | usd }}, {{ spend.calls_today }} calls{% if spend.searches_today %}, {{ spend.searches_today }} web searches{% endif %}</div>{{ meter(budget.daily_spent, budget.daily_cap) }}</div>
   <div class="card"><h3>Spend this month</h3>
     <div class="big {{ 'bad' if budget.monthly_spent >= budget.monthly_cap else ('warn' if budget.monthly_spent >= warn * budget.monthly_cap else '') }}">{{ spend.month | usd }}</div>
     <div class="muted small">of {{ budget.monthly_cap | usd }}</div>{{ meter(budget.monthly_spent, budget.monthly_cap) }}</div>

@@ -11,6 +11,7 @@ from fastapi.responses import HTMLResponse, Response
 
 from app.dashboard import queries, views_ops
 from app.dashboard.core import DashboardDeps, back, render
+from app.orchestrator.web import web_status
 from app.settings import get_value
 from app.timeutil import utcnow
 
@@ -30,6 +31,15 @@ BEHAVIOUR_NUMBERS = {
     "summary.batch": int,
 }
 BEHAVIOUR_TOGGLES = ["memory.auto_approve"]
+WEB_NUMBERS = {
+    "web.search_max_uses": int,
+    "web.fetch_max_uses": int,
+    "web.fetch_max_content_tokens": int,
+    "web.daily_search_cap": int,
+    "pricing.web_search": float,
+}
+WEB_LOCATION_FIELDS = ["city", "region", "country", "timezone"]
+WEB_DOMAIN_LISTS = ["web.allowed_domains", "web.blocked_domains"]
 AMBIENT_NUMBERS = {
     "ambient.debounce_s": float,
     "ambient.threshold": float,
@@ -77,6 +87,9 @@ def register(router: APIRouter, deps: DashboardDeps) -> None:
             numbers=BEHAVIOUR_NUMBERS,
             history=list(reversed(history)),
             raw=await _raw_map(deps),
+            web_numbers=WEB_NUMBERS,
+            web_status=await web_status(deps.db, s, deps.tz),
+            searches_today=await queries.web_searches_today(deps.db, utcnow(), deps.tz),
         )
 
     @router.post("/behaviour/persona")
@@ -113,6 +126,29 @@ def register(router: APIRouter, deps: DashboardDeps) -> None:
         except queries.SettingsError as e:
             return back(request, "/behaviour", f"Not saved: {e}", "error")
         return back(request, "/behaviour", "Saved. Changes apply to the next message.")
+
+    @router.post("/behaviour/web")
+    async def web_settings(request: Request) -> Response:
+        form = await request.form()
+        try:
+            changes: dict[str, Any] = {
+                **_numbers(form, WEB_NUMBERS),
+                **_toggles(form, ["web.enabled"]),
+            }
+            for key in WEB_DOMAIN_LISTS:
+                raw = form.get(key)
+                if isinstance(raw, str):
+                    changes[key] = [d.strip() for d in raw.split() if d.strip()]
+            location = {
+                f: v.strip()
+                for f in WEB_LOCATION_FIELDS
+                if isinstance(v := form.get(f"web.user_location.{f}"), str) and v.strip()
+            }
+            changes["web.user_location"] = {"type": "approximate", **location} if location else None
+            await queries.save_settings(deps.db, changes)
+        except queries.SettingsError as e:
+            return back(request, "/behaviour", f"Not saved: {e}", "error")
+        return back(request, "/behaviour", "Web settings saved. They apply to the next message.")
 
     # --- ambient (§10.2) & harvester (§10.4) -------------------------------------------------
 

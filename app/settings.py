@@ -11,7 +11,7 @@ import sqlite3
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from app.db.database import Database
 
@@ -79,6 +79,30 @@ class Nudge(BaseModel):
         return [d for d in DAYS if d in days]
 
 
+class WebLocation(BaseModel):
+    """Approximate location that localises web search results (§7.5)."""
+
+    type: Literal["approximate"] = "approximate"
+    city: str | None = None
+    region: str | None = None
+    country: str | None = Field(None, pattern=r"^[A-Z]{2}$")  # ISO 3166-1 alpha-2
+    timezone: str | None = None
+
+
+class WebToolVersions(BaseModel):
+    """Server tool type strings (§7.5), from current Anthropic docs; never hardcoded in code."""
+
+    web_search: str = Field(min_length=1, pattern=r"^web_search_\d{8}$")
+    web_fetch: str = Field(min_length=1, pattern=r"^web_fetch_\d{8}$")
+
+
+def _domains(value: list[str]) -> list[str]:
+    out = [d.strip().lower() for d in value if d.strip()]
+    if any("://" in d or " " in d for d in out):
+        raise ValueError("domains are bare hosts like example.com (no scheme, no spaces)")
+    return out
+
+
 class RuntimeSettings(BaseModel):
     persona_system_prompt: str
     models: Models
@@ -121,6 +145,27 @@ class RuntimeSettings(BaseModel):
     backup_enabled: bool = True
     backup_time: str = "03:00"
     backup_keep: int = Field(14, ge=1)
+    web_enabled: bool = False
+    web_search_max_uses: int = Field(3, ge=1, le=10)
+    web_fetch_max_uses: int = Field(2, ge=0, le=10)  # 0 → no web_fetch tool
+    web_fetch_max_content_tokens: int = Field(4000, ge=500)
+    web_daily_search_cap: int = Field(50, ge=0)
+    web_user_location: WebLocation | None = None
+    web_allowed_domains: list[str] = Field(default_factory=list)
+    web_blocked_domains: list[str] = Field(default_factory=list)
+    web_tool_versions: WebToolVersions | None = None  # None → web tools stay off
+    pricing_web_search: float = Field(0.0, ge=0)  # USD per search (`pricing.web_search`)
+
+    @field_validator("web_allowed_domains", "web_blocked_domains")
+    @classmethod
+    def _web_domains(cls, value: list[str]) -> list[str]:
+        return _domains(value)
+
+    @model_validator(mode="after")
+    def _one_domain_list(self) -> RuntimeSettings:
+        if self.web_allowed_domains and self.web_blocked_domains:
+            raise ValueError("set web.allowed_domains or web.blocked_domains, not both")
+        return self
 
     @field_validator("backup_time")
     @classmethod
@@ -147,6 +192,8 @@ class RuntimeSettings(BaseModel):
             group, _, name = key.partition(".")
             if group == "models":
                 models[name] = value
+            elif key == "pricing.web_search":  # a per-search price, not a model's token prices
+                flat["pricing_web_search"] = value
             elif group == "pricing":
                 pricing[name] = value
             else:

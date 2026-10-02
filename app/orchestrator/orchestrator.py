@@ -7,7 +7,7 @@ import logging
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import datetime
-from typing import Any
+from typing import Any, cast
 from zoneinfo import ZoneInfo
 
 from anthropic.types import (
@@ -15,6 +15,7 @@ from anthropic.types import (
     ContentBlockParam,
     MessageParam,
     ToolResultBlockParam,
+    ToolUnionParam,
 )
 
 from app.brain.memory import MemoryService
@@ -24,11 +25,26 @@ from app.db.repos import summaries as summaries_repo
 from app.db.repos.users import UserRecord
 from app.decisions.engine import PickRequest
 from app.decisions.service import DecisionService
-from app.llm.client import BudgetExceeded, LLMClient, LLMError, LLMRequest, LLMResponse
+from app.llm.client import (
+    BudgetExceeded,
+    LLMBadRequest,
+    LLMClient,
+    LLMError,
+    LLMRequest,
+    LLMResponse,
+)
 from app.orchestrator.history import build_messages
 from app.orchestrator.prompt import build_system, dynamic_context
 from app.orchestrator.summary import Summarizer
 from app.orchestrator.tools import ToolRouter, TurnContext
+from app.orchestrator.web import (
+    server_calls,
+    sources,
+    used_web,
+    web_status,
+    web_tools,
+    with_sources,
+)
 from app.settings import SettingsStore
 from app.timeutil import utcnow
 
@@ -38,6 +54,9 @@ MAX_TOOL_ITERATIONS = 6
 FALLBACK_OFFLINE = "My brain's offline right now 🤕"
 FALLBACK_BUDGET = "I've hit my spending cap for now 💸"
 FALLBACK_EMPTY = "🤔"
+# Server-side web tool blocks (§7.5) go back to the API exactly as received: search results carry
+# encrypted_content the API needs to restore them on the next request.
+SERVER_BLOCKS = frozenset({"server_tool_use", "web_search_tool_result", "web_fetch_tool_result"})
 
 
 @dataclass(frozen=True)
@@ -56,14 +75,16 @@ class Reply:
 
 
 def assistant_blocks(content: Sequence[ContentBlock]) -> list[ContentBlockParam]:
-    """Echo Claude's turn back as request params: text and tool_use only, built field by field
-    so response-only attributes never leak into the next request."""
+    """Echo Claude's turn back as request params: text and tool_use built field by field so
+    response-only attributes never leak into the next request; server web tool blocks verbatim."""
     out: list[ContentBlockParam] = []
     for b in content:
         if b.type == "text" and b.text:
             out.append({"type": "text", "text": b.text})
         elif b.type == "tool_use":
             out.append({"type": "tool_use", "id": b.id, "name": b.name, "input": b.input})
+        elif b.type in SERVER_BLOCKS:
+            out.append(cast(ContentBlockParam, b.model_dump(mode="json", exclude_none=True)))
     return out
 
 
@@ -143,20 +164,37 @@ class Orchestrator:
             source=f"telegram:{chat.chat_id}",
         )
         pinned = await self._memory.pinned_block() if self._memory is not None else None
-        system = build_system(
-            s.persona_system_prompt,
-            dynamic_context(
-                now=self._clock(),
-                actor=actor,
-                users=self._users,
-                is_group=chat.is_group,
-                default_for_users=ctx.default_for_users,
-                unprompted_reason=unprompted_reason,
-            ),
-            pinned=pinned,
-        )
+        web = await web_status(self._db, s, self._tz)
+        if not web.on and web.reason != "disabled":
+            log.info("web tools off", extra={"reason": web.reason})
+
+        def system_for(web_on: bool) -> list[Any]:
+            return build_system(
+                s.persona_system_prompt,
+                dynamic_context(
+                    now=self._clock(),
+                    actor=actor,
+                    users=self._users,
+                    is_group=chat.is_group,
+                    default_for_users=ctx.default_for_users,
+                    unprompted_reason=unprompted_reason,
+                    web_paused=web.temporarily_off,
+                ),
+                pinned=pinned,
+                web=web_on,
+            )
+
+        tools: list[ToolUnionParam] = [*self._tools.definitions()]
         try:
-            resp = await self._loop(system, messages, ctx)
+            try:
+                extra = web_tools(s) if web.on else []
+                resp = await self._loop(system_for(bool(extra)), messages, ctx, [*tools, *extra])
+            except LLMBadRequest:
+                if not web.on or ctx.web_used:
+                    raise
+                # e.g. web search disabled for the org in the Console: answer without the web.
+                log.warning("request with web tools rejected; retrying without them")
+                resp = await self._loop(system_for(False), messages, ctx, tools)
         except BudgetExceeded as e:
             log.warning("budget exhausted", extra={"period": e.period})
             reply = await self._fallback(FALLBACK_BUDGET, chat, actor, text, ctx)
@@ -167,6 +205,8 @@ class Orchestrator:
         if resp.message.stop_reason == "refusal":
             return Reply("I'd rather not help with that one.", from_llm=False, picks=ctx.last_picks)
         out = resp.text.strip()
+        if out and ctx.web_used:
+            out = with_sources(out, sources(resp.message))
         if not out:
             if ctx.last_picks:
                 out = f"🎲 {bold_list([n for _, n in ctx.last_picks])}"
@@ -175,9 +215,12 @@ class Orchestrator:
         return Reply(out, from_llm=True, picks=ctx.last_picks)
 
     async def _loop(
-        self, system: Any, messages: list[MessageParam], ctx: TurnContext
+        self,
+        system: Any,
+        messages: list[MessageParam],
+        ctx: TurnContext,
+        tools: list[ToolUnionParam],
     ) -> LLMResponse:
-        tools = self._tools.definitions()
         for i in range(MAX_TOOL_ITERATIONS + 1):
             last = i == MAX_TOOL_ITERATIONS
             resp = await self._llm.complete(
@@ -192,6 +235,14 @@ class Orchestrator:
                     chat_id=ctx.chat_id,
                 )
             )
+            await self._note_web(resp, ctx)
+            if resp.message.stop_reason == "pause_turn" and not last:
+                # A long server-tool turn paused; sending it back unchanged resumes it.
+                messages = [
+                    *messages,
+                    {"role": "assistant", "content": assistant_blocks(resp.message.content)},
+                ]
+                continue
             if resp.message.stop_reason != "tool_use" or last:
                 return resp
             messages = [
@@ -203,6 +254,17 @@ class Orchestrator:
                 {"role": "user", "content": await self._run_tools(resp, ctx)},
             ]
         raise AssertionError("unreachable")
+
+    async def _note_web(self, resp: LLMResponse, ctx: TurnContext) -> None:
+        """Mark the turn as web-assisted and store each search/fetch for the conversation view.
+        Failed lookups need no handling here: Claude sees the error result and answers from what
+        it has (§7.5), and max_uses stops any retry loop."""
+        if not used_web(resp.message.content):
+            return
+        ctx.web_used = True
+        for call in server_calls(resp.message.content):
+            log.info("web tool", extra={"tool": call.name, "error": call.error_code or None})
+            await self._store_tool_call(ctx.chat_id, call.name, call.input, call.result)
 
     async def _run_tools(self, resp: LLMResponse, ctx: TurnContext) -> list[ContentBlockParam]:
         results: list[ContentBlockParam] = []

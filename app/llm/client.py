@@ -21,7 +21,7 @@ from anthropic.types import (
     MessageParam,
     TextBlockParam,
     ToolChoiceParam,
-    ToolParam,
+    ToolUnionParam,
 )
 from anthropic.types.message_create_params import MessageCreateParamsNonStreaming
 from anthropic.types.messages.batch_create_params import Request
@@ -51,6 +51,10 @@ class LLMUnavailable(LLMError):
     """No API key, auth failure, or the API kept failing after retries."""
 
 
+class LLMBadRequest(LLMUnavailable):
+    """The API rejected the request itself (400), e.g. web search disabled for the org."""
+
+
 class BudgetExceeded(LLMError):
     def __init__(self, period: Literal["daily", "monthly"], spent: float, cap: float) -> None:
         super().__init__(f"{period} budget exhausted: ${spent:.4f} of ${cap:.2f}")
@@ -66,7 +70,7 @@ class LLMRequest:
     system: Sequence[TextBlockParam]
     messages: Sequence[MessageParam]
     max_tokens: int | None = None  # None → settings llm.max_tokens
-    tools: Sequence[ToolParam] = field(default_factory=tuple)
+    tools: Sequence[ToolUnionParam] = field(default_factory=tuple)  # client + server tools
     tool_choice: ToolChoiceParam | None = None
     json_schema: dict[str, Any] | None = None  # structured output (output_config.format)
     user_id: int | None = None
@@ -294,6 +298,8 @@ class AnthropicLLMClient:
             "anthropic call failed",
             extra={"purpose": req.purpose, "model": model, "error": type(e).__name__},
         )
+        if isinstance(e, anthropic.BadRequestError):
+            return LLMBadRequest(type(e).__name__)
         return LLMUnavailable(type(e).__name__)
 
     async def _record_usage(
@@ -310,12 +316,19 @@ class AnthropicLLMClient:
         price = settings.pricing.get(model)
         if price is None:
             log.warning("no pricing for model; cost recorded as 0", extra={"model": model})
-        cost = discount * cost_usd(
-            price,
-            input_tokens=u.input_tokens,
-            output_tokens=u.output_tokens,
-            cache_read_tokens=cache_read,
-            cache_write_tokens=cache_write,
+        searches = u.server_tool_use.web_search_requests if u.server_tool_use else 0
+        fetches = u.server_tool_use.web_fetch_requests if u.server_tool_use else 0
+        # Searches are billed per search on top of tokens, batch or not; fetches only by tokens.
+        cost = (
+            discount
+            * cost_usd(
+                price,
+                input_tokens=u.input_tokens,
+                output_tokens=u.output_tokens,
+                cache_read_tokens=cache_read,
+                cache_write_tokens=cache_write,
+            )
+            + searches * settings.pricing_web_search
         )
         row = usage_repo.UsageRow(
             user_id=req.user_id,
@@ -329,6 +342,8 @@ class AnthropicLLMClient:
             cache_write_tokens=cache_write,
             cost_usd=cost,
             created_at=to_sql(utcnow()),
+            web_search_requests=searches,
+            web_fetch_requests=fetches,
         )
         await self._db.write(lambda conn: usage_repo.insert(conn, row))
         log.info(
@@ -340,6 +355,8 @@ class AnthropicLLMClient:
                 "out": u.output_tokens,
                 "cache_read": cache_read,
                 "cache_write": cache_write,
+                "web_search": searches,
+                "web_fetch": fetches,
                 "cost_usd": round(cost, 6),
                 "stop": message.stop_reason,
             },

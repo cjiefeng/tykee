@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **Status** | Draft v1.24 (M6 ops: nudges, backups, healthcheck + watchdog, runbook) |
+| **Status** | Draft v1.25 (M7 web access: search + fetch server tools, gating, web memory safety) |
 | **Name** | Tykee: phonetic spelling of Tyche, the Greek goddess of chance. Telegram handle e.g. `@TykeeBot` (must end in "bot") |
 | **Author** | Jack |
 | **Date** | 2026-10-01 |
@@ -601,11 +601,13 @@ Tykee can look things up online using the Claude API's built-in **web search** a
 |---|---|---|
 | `web.enabled` | `true` once M7 ships | Master switch. |
 | `web.search_max_uses` | 3 | Max searches per orchestrator call (passed as the tool's max-uses parameter). |
-| `web.fetch_max_uses` | 2 | Max page fetches per orchestrator call. |
+| `web.fetch_max_uses` | 2 | Max page fetches per orchestrator call; 0 drops the fetch tool. |
+| `web.fetch_max_content_tokens` | 4000 | Truncates fetched pages (the tool's `max_content_tokens`), so one fetch can't cost 25k+ input tokens. |
 | `web.daily_search_cap` | 50 | Hard cap across both users; when hit, web tools are dropped from the tool list until midnight (user TZ). |
 | `web.user_location` | Singapore (city/country/timezone) | Localises search results. |
 | `web.allowed_domains` / `web.blocked_domains` | empty | Optional allow/block lists. |
-| `web.tool_versions` | from current docs | Tool type strings, never hardcoded in code paths. |
+| `web.tool_versions` | `web_search_20250305`, `web_fetch_20250910` | Tool type strings, never hardcoded in code paths. The basic variants: every current model accepts them, including the Haiku-tier default (the dynamic-filtering `_20260209`+ variants need a 4.6+ Sonnet/Opus and run code execution). |
+| `pricing.web_search` | 0.01 | USD per search ($10 per 1,000, current pricing docs). Fetches cost tokens only. |
 
 **Behaviour rules (added to persona)**
 - Check the second brain first; search the web only when the answer depends on live or external facts (opening hours, reviews, showtimes, prices, events).
@@ -619,6 +621,15 @@ Tykee can look things up online using the Claude API's built-in **web search** a
 **Usage & cost:** the `usage` row records `web_search_requests` and `web_fetch_requests` from the response's usage block. Searches are billed per search on top of tokens (price per search in `settings.pricing.web_search`, from current pricing docs). Search results add input tokens, so a web-assisted reply costs noticeably more than a normal one. Both count toward the daily/monthly budget caps; when the budget hits 80%, web tools are disabled first, before any other degradation.
 
 **Failure handling:** if a web tool returns an error (rate limit, fetch blocked, unavailable), Claude answers from memory/general knowledge and says it couldn't check live info. Never retry in a loop.
+
+**Implementation notes (M7):**
+- `app/orchestrator/web.py` holds the gate (`web_status`), the tool definitions built from settings (`web_tools`), and readers for the result blocks. A test fails if anything outside the orchestrator builds web tools.
+- **Gate, checked once per turn:** `web.enabled` (and `web.tool_versions` set) → today's searches (`SUM(usage.web_search_requests)` since local midnight) < `web.daily_search_cap` → daily and monthly spend both below `budget.warn_ratio` × cap. When the cap or budget closes the gate, the dynamic context tells Claude lookups are paused so it says it can't check live info. The web rules are appended to the cached rules block only when the tools are offered.
+- **Org-level disable:** a 400 on a request that carried web tools (e.g. web search turned off in the Console) is retried once without them instead of falling back to "offline" (`LLMBadRequest`).
+- **Memory safety, enforced in code, not just the persona:** once a web search/fetch has run in a turn, `write_note` returns an error pointing to `propose_memory`, and every `propose_memory` in that turn goes to the inbox even with `memory.auto_approve`. `propose_memory` also takes an optional `source_url`; when given, the inbox source is `web:<url>` and review is forced in any turn.
+- **Echoing turns:** server tool blocks (`server_tool_use`, `web_search_tool_result`, `web_fetch_tool_result`) are sent back verbatim, since search results carry `encrypted_content` the API needs. `pause_turn` is resumed by re-sending the paused assistant turn (counts toward the 6-iteration limit). As with client tools, web results are not replayed in later turns' history.
+- **Sources:** if the final text has no link, up to two cited search results are appended as `[site](url)`, which the formatter turns into `<a>` links.
+- **Visibility:** each search/fetch is stored as a `role='tool'` row (query or URL, result URLs or `error: <code>`) for the conversation view; the Overview spend tile shows today's search count; Behaviour → **Web** has the switch, limits, location, domain lists and per-search price with an On / Paused / Off status line.
 
 ### 7.4 Behaviour rules (default persona excerpt)
 
