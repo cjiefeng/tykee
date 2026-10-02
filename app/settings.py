@@ -45,6 +45,7 @@ class RuntimeSettings(BaseModel):
     llm_max_tokens: int = 400
     budget_daily_usd: float = 1.0
     budget_monthly_usd: float = 15.0
+    decisions_session_hours: float = 6.0
 
     def model_for(self, role: ModelRole) -> str:
         return str(getattr(self.models, role))

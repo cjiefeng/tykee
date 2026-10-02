@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import sqlite3
+import stat
+from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from aiogram import Bot, Dispatcher
@@ -16,6 +19,7 @@ from app.config import Env
 from app.db.database import Database
 from app.db.migrate import apply_migrations
 from app.db.repos.users import UserRecord, load_enabled, upsert_allowlist
+from app.decisions.service import DecisionService
 from app.llm.client import AnthropicLLMClient
 from app.logging import setup_logging
 from app.orchestrator.orchestrator import Orchestrator
@@ -35,6 +39,26 @@ ALLOWED_UPDATES = [
     "my_chat_member",
     "message_reaction",
 ]
+
+
+def check_data_dir(data_dir: Path) -> str | None:
+    """Return a human-readable problem if the data dir isn't writable, else None."""
+    try:
+        data_dir.mkdir(parents=True, exist_ok=True)
+        probe = data_dir / ".write-test"
+        probe.write_bytes(b"")
+        probe.unlink()
+    except OSError as e:
+        try:
+            st = data_dir.stat()
+            owner = f"owned by uid {st.st_uid}:{st.st_gid}, mode {stat.filemode(st.st_mode)}"
+        except OSError:
+            owner = "not accessible"
+        return (
+            f"cannot write to {data_dir} ({owner}); this process runs as uid {os.getuid()}. "
+            f"Fix on the host, e.g. `sudo chown 1000:1000 <host data dir>`. ({e.strerror})"
+        )
+    return None
 
 
 async def run(env: Env) -> None:
@@ -69,9 +93,22 @@ async def run(env: Env) -> None:
         )
         if not llm.configured:
             log.warning("ANTHROPIC_API_KEY not set: running in fallback mode")
-        orchestrator = Orchestrator(db=db, settings=settings, llm=llm, users=users)
+        decisions = DecisionService(db=db, settings=settings, users=users)
+        orchestrator = Orchestrator(
+            db=db,
+            settings=settings,
+            llm=llm,
+            decisions=decisions,
+            users=users,
+            tz=ZoneInfo(env.tz),
+        )
         adapter = TelegramAdapter(
-            db=db, gateway=gateway, orchestrator=orchestrator, me=me, users=users
+            db=db,
+            gateway=gateway,
+            orchestrator=orchestrator,
+            decisions=decisions,
+            me=me,
+            users=users,
         )
         dp = Dispatcher()
         dp.update.outer_middleware(
@@ -88,6 +125,10 @@ async def run(env: Env) -> None:
 def main() -> None:
     env = Env()
     setup_logging(env.log_level)
+    problem = check_data_dir(env.data_dir)
+    if problem:
+        log.error(problem)
+        raise SystemExit(1)
     try:
         asyncio.run(run(env))
     except TelegramUnauthorizedError:

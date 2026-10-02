@@ -14,7 +14,13 @@ from typing import Literal, Protocol
 from zoneinfo import ZoneInfo
 
 import anthropic
-from anthropic.types import Message, MessageParam, TextBlockParam, ToolParam
+from anthropic.types import (
+    Message,
+    MessageParam,
+    TextBlockParam,
+    ToolChoiceParam,
+    ToolParam,
+)
 
 from app.db.database import Database
 from app.db.repos import usage as usage_repo
@@ -55,6 +61,7 @@ class LLMRequest:
     messages: Sequence[MessageParam]
     max_tokens: int | None = None  # None → settings llm.max_tokens
     tools: Sequence[ToolParam] = field(default_factory=tuple)
+    tool_choice: ToolChoiceParam | None = None
     user_id: int | None = None
     chat_id: int | None = None
     import_job_id: int | None = None
@@ -146,6 +153,7 @@ class AnthropicLLMClient:
                 system=list(req.system),
                 messages=list(req.messages),
                 tools=list(req.tools) if req.tools else anthropic.omit,
+                tool_choice=req.tool_choice if req.tool_choice is not None else anthropic.omit,
             )
         except anthropic.AuthenticationError as e:
             self.auth_failed = True

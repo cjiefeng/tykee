@@ -38,10 +38,16 @@ All tooling runs inside Docker (no local Python/uv needed).
 - `app/llm/client.py`: `LLMClient` protocol + `AnthropicLLMClient`, the only code that calls
   the Claude API (budget check, timeouts, SDK retries, usage/cost rows).
 - `app/telegram/`: `AccessGate` outer middleware (allowlist + allowed group, runs before
-  anything else), `TelegramAdapter` (persist + reply when addressed), `ChatGateway` port,
-  HTML formatting/splitting.
-- `app/orchestrator/`: prompt assembly (§7.2), history replay, turn handling.
-- `tests/fakes/`: `FakeLLMClient`, `FakeGateway`. `tests/conftest.py` has a migrated temp DB.
+  anything else), `TelegramAdapter` (persist + reply when addressed, commands, ✅🎲❌
+  callbacks), `ChatGateway` port, keyboards, HTML formatting/splitting.
+- `app/decisions/`: category resolver (§8.1: alias → slug → Claude chooses from the catalog),
+  engine (§8.2–8.3 weighting/sampling; pure math split from DB code), feedback (§8.4), and
+  `DecisionService`, the async façade used by tools, commands, callbacks and fallback.
+- `app/orchestrator/`: prompt assembly (§7.2), history replay, Claude tool loop (max 6
+  iterations, then `tool_choice: none`), tool schemas + router in `tools.py`, fallback (§8.5).
+- `tests/fakes/`: `FakeLLMClient` (scripted text / `tool_call(...)` / exceptions), `FakeGateway`.
+  `tests/conftest.py`: migrated temp DB (`env`), `make_stack()` wiring the whole bot with fakes,
+  `seed_category()`.
 
 ## Conventions
 
@@ -56,7 +62,10 @@ All tooling runs inside Docker (no local Python/uv needed).
   `app/telegram/formatting.py` escapes and converts. Never send unescaped model text as HTML.
 - History replay sends only user text and final assistant text; tool calls are stored for
   debugging, not replayed. Fallback replies are not stored in history.
-- Randomness lives in code, never in the LLM (§8).
+- Randomness lives in code, never in the LLM (§8). Engine functions take an injectable
+  `random.Random`; tests seed it and use the `Clock` from `tests/conftest.py`.
+- Tool inputs are validated with pydantic; bad input goes back to Claude as an `is_error`
+  tool result, never an exception.
 - Logging: structured JSON to stdout. No secrets and no message contents at INFO.
 - Secrets only via `.env` (see `.env.example`); never commit `.env` or `data/`.
 - Commit at sensible checkpoints with clear messages.

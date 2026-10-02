@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import json
+import random
 import sqlite3
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import pytest
 from aiogram.types import Chat, Message, MessageEntity, User
@@ -13,8 +16,13 @@ from app.config import parse_allowlist
 from app.db.database import Database
 from app.db.migrate import apply_migrations
 from app.db.repos.users import UserRecord, load_enabled, upsert_allowlist
+from app.decisions.service import DecisionService
+from app.orchestrator.orchestrator import Orchestrator
 from app.settings import SettingsStore, seed_settings
+from app.telegram.adapter import TelegramAdapter
 from app.telegram.addressing import BotIdentity
+from tests.fakes.fake_gateway import FakeGateway
+from tests.fakes.fake_llm import FakeLLMClient
 
 JACK_TG = 111
 PARTNER_TG = 222
@@ -22,6 +30,10 @@ STRANGER_TG = 999
 GROUP_ID = -100500
 BOT = BotIdentity(id=777, username="TykeeBot")
 ALLOWLIST = parse_allowlist(f"{JACK_TG}:jack,{PARTNER_TG}:partner")
+
+
+NOW = datetime(2026, 10, 2, 11, 0, tzinfo=UTC)  # 19:00 in Asia/Singapore
+TZ = ZoneInfo("Asia/Singapore")
 
 
 @dataclass
@@ -90,3 +102,67 @@ def tg_message(
 def mention(text: str, handle: str = "@TykeeBot") -> tuple[str, list[MessageEntity]]:
     full = f"{handle} {text}"
     return full, [MessageEntity(type="mention", offset=0, length=len(handle))]
+
+
+@dataclass
+class Clock:
+    now: datetime = NOW
+
+    def __call__(self) -> datetime:
+        return self.now
+
+    def advance(self, **kw: float) -> None:
+        self.now = self.now + timedelta(**kw)
+
+
+@dataclass
+class Stack:
+    adapter: TelegramAdapter
+    gateway: FakeGateway
+    decisions: DecisionService
+    orchestrator: Orchestrator
+    llm: FakeLLMClient
+    clock: Clock
+
+
+def make_stack(env: Env, llm: FakeLLMClient | None = None, seed: int = 7) -> Stack:
+    clock = Clock()
+    llm = llm or FakeLLMClient()
+    gw = FakeGateway()
+    decisions = DecisionService(
+        db=env.db, settings=env.settings, users=env.users, clock=clock, rng=random.Random(seed)
+    )
+    orch = Orchestrator(
+        db=env.db,
+        settings=env.settings,
+        llm=llm,
+        decisions=decisions,
+        users=env.users,
+        tz=TZ,
+        clock=clock,
+    )
+    adapter = TelegramAdapter(
+        db=env.db, gateway=gw, orchestrator=orch, decisions=decisions, me=BOT, users=env.users
+    )
+    return Stack(adapter, gw, decisions, orch, llm, clock)
+
+
+async def seed_category(
+    env: Env, slug: str, options: list[tuple[str, list[str]]] | None = None, tau: float = 3.0
+) -> int:
+    def _seed(conn: sqlite3.Connection) -> int:
+        cur = conn.execute(
+            "INSERT INTO categories(slug, display_name, description, recency_tau_days) "
+            "VALUES (?, ?, ?, ?)",
+            (slug, slug.capitalize(), f"choosing {slug}", tau),
+        )
+        cid = int(cur.lastrowid or 0)
+        conn.execute("INSERT INTO category_aliases(alias, category_id) VALUES (?, ?)", (slug, cid))
+        for name, tags in options or []:
+            conn.execute(
+                "INSERT INTO options(category_id, name, tags_json) VALUES (?, ?, ?)",
+                (cid, name, json.dumps(tags)),
+            )
+        return cid
+
+    return await env.db.write(_seed)
