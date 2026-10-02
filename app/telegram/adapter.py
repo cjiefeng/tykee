@@ -33,7 +33,9 @@ from app.orchestrator.orchestrator import (
     bold_list,
     default_for_users,
 )
+from app.places import pets as pets_mod
 from app.places.decide import SharedPlaces
+from app.places.recommend import RecommendError, RecommendService, line
 from app.telegram.addressing import (
     BotIdentity,
     Command,
@@ -48,6 +50,8 @@ from app.telegram.keyboards import (
     inbox_keyboard,
     parse_callback,
     parse_inbox_callback,
+    parse_more,
+    recommend_keyboard,
 )
 from app.telegram.middleware import GROUP_TYPES
 from app.telegram.topics import TopicService, is_topic_error, send_thread, thread_of
@@ -96,8 +100,10 @@ class TelegramAdapter:
         topics: TopicService | None = None,
         health: HealthState | None = None,
         places: SharedPlaces | None = None,
+        recommend: RecommendService | None = None,
     ) -> None:
         self._places = places
+        self._recommend = recommend
         self._topics = topics
         self._health = health
         self._memory = memory
@@ -121,6 +127,10 @@ class TelegramAdapter:
         @router.callback_query(F.data.startswith("d:"))
         async def _on_callback(callback: CallbackQuery, actor: UserRecord) -> None:
             await self.handle_callback(callback, actor)
+
+        @router.callback_query(F.data.startswith("r:"))
+        async def _on_more(callback: CallbackQuery, actor: UserRecord) -> None:
+            await self.handle_more(callback, actor)
 
         @router.callback_query(F.data.startswith("m:"))
         async def _on_inbox_callback(callback: CallbackQuery, actor: UserRecord) -> None:
@@ -218,6 +228,7 @@ class TelegramAdapter:
                 picks=reply.picks,
                 store=reply.from_llm,
                 thread=thread,
+                recommendation=reply.recommendation,
             )
         if reply.budget_exhausted:
             await self._notify_budget()
@@ -268,15 +279,18 @@ class TelegramAdapter:
         picks: Sequence[tuple[int, str]] = (),
         store: bool = True,
         thread: int | None = None,
+        recommendation: bool = False,
     ) -> list[int]:
         """``thread`` is the topic the message belongs to (stored), sent as
-        ``message_thread_id`` except for General."""
+        ``message_thread_id`` except for General. ``recommendation``: numbered place picks
+        (§10.6) get [✅ 1] … [🎲 more] instead of the usual ✅ 🎲 ❌ rows."""
+        keyboard = recommend_keyboard(picks) if recommendation else decision_keyboard(picks)
         try:
             ids = await self._gateway.send_text(
                 chat_id,
                 text,
                 reply_to=reply_to,
-                keyboard=decision_keyboard(picks),
+                keyboard=keyboard,
                 thread_id=send_thread(thread),
             )
         except TelegramBadRequest as e:
@@ -481,6 +495,8 @@ class TelegramAdapter:
                 text = f"🗂 **Suggestion:** {item.content}"
             elif item.kind == "option":
                 text = f"➕ **Suggestion:** {item.content}"  # noqa: RUF001
+            elif item.kind == "attribute":
+                text = f"📍 **Place info:** {item.content}"
             else:
                 text = f"📥 **{item.owner}** → {item.target_path}\n{item.content}"
             if item.reason:
@@ -533,7 +549,12 @@ class TelegramAdapter:
         if not reply.text or (not reply.from_llm and not reply.picks):
             return None
         ids = await self._send(
-            chat_id, reply.text, picks=reply.picks, store=reply.from_llm, thread=thread
+            chat_id,
+            reply.text,
+            picks=reply.picks,
+            store=reply.from_llm,
+            thread=thread,
+            recommendation=reply.recommendation,
         )
         return ids[0] if ids else None
 
@@ -579,8 +600,12 @@ class TelegramAdapter:
         thread, reply_to = await self._callback_target(cb.message)
 
         fb = await self._decisions.feedback(decision_id, action, actor.id)
-        remaining = await self._decisions.open_on_message(chat_id, message_id)
-        await self._gateway.set_keyboard(chat_id, message_id, decision_keyboard(remaining))
+        if fb.recommendation:
+            # One ✅ settles a recommendation; 🎲 more is the way to see others.
+            await self._gateway.set_keyboard(chat_id, message_id, None)
+        else:
+            remaining = await self._decisions.open_on_message(chat_id, message_id)
+            await self._gateway.set_keyboard(chat_id, message_id, decision_keyboard(remaining))
         if not fb.applied:
             await self._gateway.answer_callback(cb.id, "Already sorted 👍")
             return
@@ -588,6 +613,8 @@ class TelegramAdapter:
 
         if action == "accept":
             await self._gateway.answer_callback(cb.id, "Locked in ✅")
+            if fb.place_id is not None and self._places is not None:
+                await self._places.places.visit(fb.place_id)  # becomes visited + noted (§10.6)
             await self._mirror_decision(decision_id, actor)
             await self._send(
                 chat_id, f"✅ **{fb.choice_text}** it is.", reply_to=reply_to, thread=thread
@@ -614,3 +641,47 @@ class TelegramAdapter:
                 picks=picks,
                 thread=thread,
             )
+
+    async def handle_more(self, cb: CallbackQuery, actor: UserRecord) -> None:
+        """🎲 more on a recommendation (§10.6): the same request again from known places, never
+        repeating one already shown; code-composed, no Claude call."""
+        decision_id = parse_more(cb.data)
+        if decision_id is None or cb.message is None or self._recommend is None:
+            await self._gateway.answer_callback(cb.id, "That button has expired.")
+            return
+        chat_id, message_id = cb.message.chat.id, cb.message.message_id
+        thread, reply_to = await self._callback_target(cb.message)
+        await self._gateway.set_keyboard(chat_id, message_id, None)
+        for did, _ in await self._decisions.open_on_message(chat_id, message_id):
+            await self._decisions.feedback(did, "reroll", actor.id)
+        try:
+            result = await self._recommend.more(decision_id, asked_by=actor.id, chat_id=chat_id)
+        except RecommendError as e:
+            await self._gateway.answer_callback(cb.id, str(e)[:190])
+            return
+        where = result.request.centre.label
+        if not result.picks:
+            await self._gateway.answer_callback(cb.id, "Nothing else nearby 🤷")
+            await self._send(
+                chat_id,
+                f"That's every place I know around {where} 🤷 Ask me to look online for more.",
+                reply_to=reply_to,
+                thread=thread,
+            )
+            return
+        await self._gateway.answer_callback(cb.id, "🎲")
+        pets = await self._memory.pets() if self._memory is not None else []
+        emoji = pets_mod.emoji(pets)
+        lines = [
+            line(await self._recommend.describe(x, result.request.must, emoji))
+            for x in result.picks
+        ]
+        picks = [(x.decision_id, x.item.place.name) for x in result.picks]
+        await self._send(
+            chat_id,
+            "\n".join([f"🎲 More around {where}:", *lines]),
+            reply_to=reply_to,
+            picks=picks,
+            thread=thread,
+            recommendation=True,
+        )

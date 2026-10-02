@@ -18,6 +18,8 @@ from app.brain.retrieval import Hit, Retriever
 from app.brain.store import NoteStore, WriteMode, WriteResult
 from app.db.database import Database
 from app.db.repos.users import UserRecord
+from app.places import pets as pets_mod
+from app.places.pets import Pet
 from app.settings import SettingsStore
 from app.timeutil import to_sql, utcnow
 
@@ -30,7 +32,7 @@ class MemoryPolicyError(ValueError):
     """A memory operation that isn't allowed or can't be done; message is safe to show Claude."""
 
 
-InboxKind = Literal["note", "category", "option"]
+InboxKind = Literal["note", "category", "option", "attribute"]
 
 
 @dataclass(frozen=True)
@@ -144,6 +146,10 @@ class MemoryService:
             log.warning("pinned notes truncated", extra={"chars": len(text)})
             text = text[: s.memory_pinned_max_chars] + "\n[…truncated]"
         return text
+
+    async def pets(self) -> list[Pet]:
+        """§10.6: ``pets:`` in shared/household.md."""
+        return await pets_mod.load(self.store)
 
     async def avoid_tags(self, for_users: str) -> set[str]:
         slugs = self._slugs if for_users == "both" else [for_users]
@@ -267,6 +273,16 @@ class MemoryService:
             ).fetchall()
         )
         return [_inbox_row(r) for r in rows]
+
+    async def pending_with(self, content: str) -> bool:
+        """A pending item with exactly this content exists (suggest once)."""
+        row = await self._db.read(
+            lambda c: c.execute(
+                "SELECT 1 FROM memory_inbox WHERE status = 'pending' AND content = ?",
+                (content.strip(),),
+            ).fetchone()
+        )
+        return row is not None
 
     async def pending_count(self) -> int:
         row = await self._db.read(

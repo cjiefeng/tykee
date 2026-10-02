@@ -26,6 +26,8 @@ class FeedbackResult:
     choice_text: str = ""
     option_id: int | None = None
     request: PickRequest | None = None  # for rerolls
+    place_id: int | None = None
+    recommendation: bool = False  # a find_places pick (§10.6): ✅ visits the place
 
 
 def bump_pref(conn: sqlite3.Connection, option_id: int, user_id: int, factor: float) -> None:
@@ -37,11 +39,52 @@ def bump_pref(conn: sqlite3.Connection, option_id: int, user_id: int, factor: fl
     )
 
 
+def place_option(c: sqlite3.Connection, category_id: int, name: str, place_id: int) -> int:
+    """The category's option for a place (§10.5): by place, else by name (linking it), else a
+    new option tagged ``place``."""
+    row = c.execute(
+        "SELECT id FROM options WHERE category_id = ? AND place_id = ?", (category_id, place_id)
+    ).fetchone()
+    if row is not None:
+        return int(row[0])
+    by_name = c.execute(
+        "SELECT id FROM options WHERE category_id = ? AND lower(name) = lower(?)",
+        (category_id, name),
+    ).fetchone()
+    if by_name is not None:
+        c.execute(
+            "UPDATE options SET place_id = COALESCE(place_id, ?) WHERE id = ?",
+            (place_id, by_name[0]),
+        )
+        return int(by_name[0])
+    cur = c.execute(
+        "INSERT INTO options(category_id, name, tags_json, created_by, place_id) "
+        "VALUES (?, ?, ?, 'bot', ?)",
+        (category_id, name, json.dumps(["place"]), place_id),
+    )
+    return int(cur.lastrowid or 0)
+
+
+def _pick_request(raw: str | None) -> PickRequest | None:
+    """``context_json`` of a random_pick; None for other kinds (a recommendation)."""
+    if not raw:
+        return None
+    try:
+        return PickRequest.from_json(raw)
+    except (TypeError, KeyError, ValueError):
+        return None
+
+
 def _persist_generated(conn: sqlite3.Connection, row: sqlite3.Row) -> int:
-    """A generated candidate that gets accepted becomes a real option (§8.1)."""
+    """A generated candidate that gets accepted becomes a real option (§8.1); a place becomes
+    the category's option for that place."""
+    if row["place_id"] is not None:
+        oid = place_option(conn, row["category_id"], row["choice_text"], row["place_id"])
+        conn.execute("UPDATE decisions SET option_id = ? WHERE id = ?", (oid, row["id"]))
+        return oid
     tags: list[str] = []
-    if row["context_json"]:
-        req = PickRequest.from_json(row["context_json"])
+    req = _pick_request(row["context_json"])
+    if req is not None:
         tags = next(
             (
                 x.tags
@@ -89,5 +132,7 @@ def apply(
         category_id=row["category_id"],
         choice_text=row["choice_text"],
         option_id=option_id,
-        request=PickRequest.from_json(row["context_json"]) if row["context_json"] else None,
+        request=_pick_request(row["context_json"]),
+        place_id=row["place_id"],
+        recommendation='"recommend"' in (row["context_json"] or ""),
     )

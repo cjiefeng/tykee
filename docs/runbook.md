@@ -105,6 +105,9 @@ by hand otherwise; the bot is its only writer.
 | Change dashboard password | `docker compose exec tykee python -m app.dashboard.hashpw`, put both values in `.env` (single-quote the hash), `./deploy.sh`. A new `SESSION_SECRET` logs everyone out |
 | Restart without redeploying | `docker compose restart tykee` |
 | Fix a place (typo, duplicate, someone's home slipped through) | Memory → Places: rename, merge into the right one, or delete (removes its note too) |
+| Make "near home" work / add pets | Memory → Places → Your areas (e.g. Home around Bishan, also called "home, us") and Pets (`Mochi dog small`) |
+| Correct a place's pet info | Memory → Places → Attributes: set the value (counts as "you confirmed", beats any web label) or remove it |
+| Refresh the areas gazetteer | Download the three data.gov.sg GeoJSON files listed in `scripts/build_areas.py`, run `uv run python -m scripts.build_areas <folder>` in `make shell`, commit `app/seed/areas.json`; new areas are added on the next start |
 
 Changes to user names/timezones and `embedding.precision` need a restart; everything else applies
 immediately.

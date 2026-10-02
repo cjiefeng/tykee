@@ -7,7 +7,7 @@
 <nav class="tabs" aria-label="Inbox status">{% for s in ["pending", "approved", "rejected"] %}<a href="/memory/inbox?status={{ s }}"{% if s == status %} aria-current="page"{% endif %}>{{ s | capitalize }}</a>{% endfor %}</nav>
 <div class="table-wrap"><table><tr><th>What</th><th>Where</th><th>Why / source</th><th><span class="sr-only">Decision</span></th></tr>
 {% for i in items %}
-<tr id="inbox-{{ i.id }}"><td>{% if i.kind != 'note' %}<span class="pill accent">{{ 'new category' if i.kind == 'category' else 'new option' }}</span> {% endif %}{{ i.content }}<div class="muted small">{{ local(i.created_at) }}</div></td>
+<tr id="inbox-{{ i.id }}"><td>{% if i.kind != 'note' %}<span class="pill accent">{{ {'category': 'new category', 'option': 'new option', 'attribute': 'place info'}.get(i.kind, i.kind) }}</span> {% endif %}{{ i.content }}<div class="muted small">{{ local(i.created_at) }}</div></td>
 <td class="small">{{ i.target_path or 'none' }}<div class="muted">{{ i.owner }}</div></td>
 <td class="small">{{ i.reason or '' }}<div class="muted">{{ i.source or '' }}</div></td>
 <td>{% if i.status == 'pending' %}

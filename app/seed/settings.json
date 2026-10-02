@@ -59,5 +59,10 @@
   "places.reaction": "👌",
   "places.intent_phrases": ["eating here", "eat here", "let's eat here", "lets eat here", "makan here", "let's go here", "lets go here", "go here", "going here", "we're going here", "let's go this one", "lets go this one", "go this one", "this one lah", "here tonight", "dinner here", "lunch here", "meet here", "see you here", "jio here"],
   "places.intent_window_s": 120,
-  "places.meal_slots": [{"start": "05:00", "end": "10:30", "category": "breakfast"}, {"start": "10:30", "end": "15:00", "category": "lunch"}, {"start": "17:00", "end": "23:00", "category": "dinner"}]
+  "places.meal_slots": [{"start": "05:00", "end": "10:30", "category": "breakfast"}, {"start": "10:30", "end": "15:00", "category": "lunch"}, {"start": "17:00", "end": "23:00", "category": "dinner"}],
+  "recommend.default_n": 3,
+  "recommend.default_radius_m": 1500,
+  "recommend.explore_ratio": 0.34,
+  "recommend.web_attr_ttl_days": 180,
+  "recommend.max_web_searches": 2
 }

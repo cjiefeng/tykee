@@ -521,6 +521,58 @@ async def test_places_page_actions_and_settings(dash: Dash, env: Env) -> None:
     assert "HH:MM-HH:MM category" in await dash.flash("/memory/places")
 
 
+async def test_places_attributes_filters_areas_and_pets(dash: Dash, env: Env) -> None:
+    from app.places.service import Candidate
+
+    places = dash.stack.places
+    near = await places.upsert(
+        Candidate("Merci Marcel", "https://maps.app.goo.gl/m", lat=1.2840, lng=103.8320)
+    )
+    far = await places.upsert(
+        Candidate("Far Cafe", "https://maps.app.goo.gl/f", lat=1.3500, lng=103.8400)
+    )
+    await places.set_attribute(far.id, "pet_friendly", "yes", source="web", evidence="x")
+    await dash.login()
+
+    await dash.post(
+        f"/memory/places/{near.id}/attribute",
+        {"key": "pet_friendly", "value": "outdoor_only", "evidence": "small dogs only"},
+    )
+    found = await places.attributes([near.id])
+    assert (found[near.id]["pet_friendly"].value, found[near.id]["pet_friendly"].source) == (
+        "outdoor_only",
+        "user",
+    )
+    page = (await dash.client.get("/memory/places?area=Tiong+Bahru")).text
+    assert "Merci Marcel" in page and "Far Cafe" not in page and "small dogs only" in page
+    page = (await dash.client.get("/memory/places?attr=pet_friendly:yes")).text
+    assert "Far Cafe" in page and "Merci Marcel</a>" not in page
+    assert "No area called" in (await dash.client.get("/memory/places?area=Atlantis")).text
+    await dash.post(
+        f"/memory/places/{near.id}/attribute", {"key": "pet_friendly", "value": "remove"}
+    )
+    assert await places.attributes([near.id]) == {}
+
+    await dash.post("/memory/places/areas", {"name": "Home", "like": "Bishan", "aliases": "us"})
+    page = (await dash.client.get("/memory/places")).text
+    assert "Home" in page and "Bishan" in page
+    await dash.post("/memory/places/areas", {"name": "Work", "like": "123 Main St"})
+    assert "a known area" in await dash.flash("/memory/places")
+
+    await dash.post("/memory/places/pets", {"pets": "Mochi dog small\n"})
+    note = await dash.stack.store.read("shared/household.md")
+    assert note is not None and note.meta["pets"] == [
+        {"name": "Mochi", "species": "dog", "size": "small"}
+    ]
+    await dash.post("/memory/places/pets", {"pets": "Mochi dog huge"})
+    assert "size is one of" in await dash.flash("/memory/places")
+
+    await dash.post("/behaviour/recommend", {"recommend.default_n": "2"})
+    assert (await env.settings.load()).recommend_default_n == 2
+    await dash.post("/behaviour/recommend", {"recommend.default_n": "9"})
+    assert "Not saved" in await dash.flash("/behaviour")
+
+
 # --- users & telegram ------------------------------------------------------------------------
 
 

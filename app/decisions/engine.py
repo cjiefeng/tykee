@@ -179,7 +179,7 @@ def _last_accepted(conn: sqlite3.Connection, category_id: int) -> dict[str, str]
     return last
 
 
-def _prefs(
+def option_prefs(
     conn: sqlite3.Connection, option_ids: Sequence[int], user_ids: Sequence[int]
 ) -> dict[int, float]:
     if not option_ids or not user_ids:
@@ -225,7 +225,7 @@ def pick(
     cands = [c for c in cands if c.key not in excluded and f"g:{c.name.casefold()}" not in excluded]
 
     last = _last_accepted(conn, category.id)
-    prefs = _prefs(conn, [c.option_id for c in cands if c.option_id is not None], pref_users)
+    prefs = option_prefs(conn, [c.option_id for c in cands if c.option_id is not None], pref_users)
     weights: list[float] = []
     for c in cands:
         t = last.get(c.key) or last.get(f"g:{c.name.casefold()}")

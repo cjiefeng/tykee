@@ -74,6 +74,13 @@ All tooling runs inside Docker (no local Python/uv needed).
   notes whose `## Details` bullets it owns, visits, rename/merge/delete, hourly retry, import
   adoption), `intent.py` + `decide.py` (`SharedPlaces`: code-only "eating here" in the answer
   topic, reactions for Claude's `record_decision`).
+- `app/places/` recommendations (§10.6, M9): `areas.py` (gazetteer seeded from `app/seed/areas.json`,
+  built by `scripts/build_areas.py` from data.gov.sg; alias → fuzzy matching; user areas copy a
+  known area's centre, never coordinates), `attributes.py` (pet_friendly & co. with provenance:
+  user beats web, web stale after a TTL), `pets.py` (`pets:` frontmatter in `shared/household.md`),
+  `recommend.py` (`RecommendService`: locate → linked-places pool → must-have filter → score →
+  weighted pick with an explore slot; web finds via `save_place_candidates`). Picks are
+  `decisions` rows with `context_json = {"recommend": …}`; buttons `[✅ n]` + `[🎲 more]` (`r:<id>`).
 - `app/dashboard/`: FastAPI + Jinja2 + vendored HTMX (§11), served by uvicorn inside the bot's
   event loop. `core.py` (LAN-only, argon2 login + lockout, sessions, CSRF, `render()`),
   `queries.py` (all dashboard SQL + validated `save_settings`), `views_*.py` per page (Places:
@@ -93,6 +100,8 @@ All tooling runs inside Docker (no local Python/uv needed).
   `service.py` (`AmbientService` ties it together; the adapter is its `responder`).
 - `scripts/embedding_eval.py`: the §6.9 int8 vs fp32 eval (needs the real models; run in the dev
   container with `uv run python -m scripts.embedding_eval all <cache dir>`).
+- Recommendation tests (`tests/unit/test_recommend.py`): `add_place(...)` seeds places/options/
+  attributes directly; web is off unless `setup(..., web=True)` (the seed turns it on).
 - Place tests: `make_stack(env, redirects={short: target})` wires an `httpx.MockTransport` into the
   resolver (anything else is a 404); `url_entities(text, *urls)` builds Telegram `url` entities.
 - `tests/fakes/`: `FakeLLMClient` (scripted text / `tool_call(...)` / exceptions), `FakeGateway`,
