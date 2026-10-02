@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **Status** | Draft v1.17 (M3: int8 eval result, memory policies, inbox via /inbox, pinned scope) |
+| **Status** | Draft v1.18 (bot data never in git; CI and deploy.sh, §14.5) |
 | **Name** | Tykee: phonetic spelling of Tyche, the Greek goddess of chance. Telegram handle e.g. `@TykeeBot` (must end in "bot") |
 | **Author** | Jack |
 | **Date** | 2026-10-01 |
@@ -956,6 +956,7 @@ All settings are read from SQLite on each request, so changes apply instantly wi
 | Strangers using the bot / burning API credit | Telegram ID allowlist enforced before any processing. |
 | Dashboard access | LAN-only bind, password + session, CSRF, no default credentials. |
 | Secrets | `.env` file readable only by container user; never logged; never shown in dashboard. |
+| Bot memory/state leaking into the code repo | Memory (vault), the SQLite DB and its WAL/SHM, the model cache, backups and imports live under `/data`, which on the NAS is outside the repo. Belt and braces: `.gitignore` ignores them by file shape wherever `TYKEE_DATA_DIR` points (`*.db*`, `vault/`, `models--*/`, `*.onnx`, `**/imports/*.json\|zip`), `.dockerignore` keeps them out of the image, `deploy.sh` refuses to start if the data dir is inside the repo and not ignored, and CI fails any PR that tracks such a file (§14.5). The vault's own nightly git commit (§14.2) is a separate local repo with **no remote**. |
 | Prompt injection via notes / user text | Tools are narrow; `write_note` path-restricted to vault folders; pinned notes immutable implicitly; no shell tools. The only network access is Anthropic's server-side web search/fetch (M7). |
 | Prompt injection / bad data via web content (M7) | Web results treated as untrusted data; web-sourced memories always require human approval in the inbox; web tools only on the orchestrator call; optional domain allow/block lists; daily search cap (§7.5). |
 | Path traversal in note paths | Resolve and enforce `vault_root in path.parents`; reject symlinks. |
@@ -1040,6 +1041,21 @@ The vector/FTS index is in the DB backup, but can always be rebuilt from the vau
 | Embedding failure on write | Note file still written; chunk marked `embed_model='pending'`; reconcile job retries. |
 | Corrupt/missing index | `System → Reindex` drops index tables and rebuilds from vault. |
 | NAS reboot | `restart: unless-stopped`; startup reconcile. |
+
+### 14.5 CI and deploying
+
+**CI** (`.github/workflows/ci.yml`, on every pull request and on pushes to `main`):
+
+| Job | What |
+|---|---|
+| lint · types · tests | `ruff check`, `ruff format --check`, `mypy --strict`, `pytest` (offline unit tests; `-m integration` stays opt-in), in `ghcr.io/astral-sh/uv:python3.12-bookworm-slim`, the same image `make check` uses, so local and CI results match (its Python allows loading `sqlite-vec`) |
+| shellcheck | `deploy.sh` |
+| no bot data committed | fails if any tracked path looks like a DB, vault, model file or `.env` |
+| docker build | `linux/amd64` image build (includes baking the embedding model), after the checks pass; layer cache in GitHub Actions; nothing is pushed |
+
+No secrets are used: unit tests run with fakes and no API key. There's no deploy from CI; the NAS is LAN-only.
+
+**Deploying** (`deploy.sh`, on the NAS): `./deploy.sh [branch]` → pull (optionally switch branch) → check `.env` (token, allowlist), data dir ownership (uid 1000) and that the data dir isn't inside the repo un-ignored → `docker compose build` → `up -d` → wait for the `polling` log line; on a startup error it prints the logs and the rollback command (`./deploy.sh <previous commit>`).
 
 ---
 

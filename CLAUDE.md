@@ -25,6 +25,7 @@ All tooling runs inside Docker (no local Python/uv needed).
 | Migrate `./data/bot.db` manually | `make migrate` (also runs automatically on startup) |
 | Build amd64 image | `make build` |
 | Run locally | `cp .env.example .env`, fill in, `make up`; `make logs`; `make down` |
+| CI | GitHub Actions `.github/workflows/ci.yml` runs the same checks on every PR (§14.5) |
 | Deploy (NAS, no make needed) | `./deploy.sh` (latest of current branch) or `./deploy.sh <branch>` to test a PR branch |
 
 ## Layout
@@ -86,5 +87,7 @@ All tooling runs inside Docker (no local Python/uv needed).
 - Tool inputs are validated with pydantic; bad input goes back to Claude as an `is_error`
   tool result, never an exception.
 - Logging: structured JSON to stdout. No secrets and no message contents at INFO.
-- Secrets only via `.env` (see `.env.example`); never commit `.env` or `data/`.
+- Secrets only via `.env` (see `.env.example`); never commit `.env`, `data/` or anything the bot
+  writes (DB, vault, model cache, backups, imports). `.gitignore` covers these by file shape and
+  CI's "no bot data committed" job enforces it (§12).
 - Commit at sensible checkpoints with clear messages.
