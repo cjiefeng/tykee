@@ -192,6 +192,22 @@ class TelegramAdapter:
             store=reply.from_llm,
             thread=thread,
         )
+        if reply.budget_exhausted:
+            await self._notify_budget()
+
+    async def _notify_budget(self) -> None:
+        """§14.4: tell the admin once per household day that replies are in fallback mode."""
+        today = datetime.now(self._tz).date().isoformat()
+        if self._health is None or self._health.budget_dm_day == today:
+            return
+        self._health.budget_dm_day = today
+        admin = next((u for u in self._users if u.is_admin), None)
+        if admin is not None:
+            await self._gateway.send_text(
+                admin.telegram_id,
+                "💸 Budget cap reached: I'm answering in fallback mode (random picks, no "
+                "Claude) until it resets. You can raise the cap in the dashboard.",
+            )
 
     async def _history_thread(self, chat_id: int, is_group: bool) -> int | None:
         if not is_group or self._topics is None:

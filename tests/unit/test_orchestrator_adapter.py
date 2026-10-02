@@ -83,7 +83,8 @@ async def test_llm_failures_fall_back_and_are_not_stored(env: Env) -> None:
     for _ in range(2):
         text, ents = mention("dinner?")
         await adapter.handle_message(tg_message(text, entities=ents), env.jack)
-    assert [s.text.split(" Try")[0] for s in gw.sent] == [FALLBACK_OFFLINE, FALLBACK_BUDGET]
+    in_group = [s.text.split(" Try")[0] for s in gw.sent if s.chat_id == GROUP_ID]
+    assert in_group == [FALLBACK_OFFLINE, FALLBACK_BUDGET]
     assert all(role in ("user", "tool") for role, _ in await _rows(env))
 
 

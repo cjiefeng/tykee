@@ -171,6 +171,35 @@ class NoteStore:
         log.info("note written", extra={"path": rel, "mode": mode, "created": created})
         return WriteResult(rel, created)
 
+    async def write_raw(self, path: str, text: str) -> str:
+        """Dashboard edit (§11): replace the whole file, frontmatter included. The text must
+        parse; the note keeps its id and gets a fresh ``updated`` stamp."""
+        rel = nt.normalise_rel(path)
+        try:
+            note = nt.parse(text)
+        except Exception as e:
+            raise NoteError(f"can't parse note: {e}") from e
+        async with self._lock:
+            existing = await self.read(rel)
+            if existing is not None and "id" in existing.meta:
+                note.meta.setdefault("id", existing.meta["id"])
+            note.meta.setdefault("id", nt.new_ulid())
+            note.meta.setdefault("owner", nt.owner_for(rel))
+            note.meta.setdefault("type", nt.default_type_for(rel))
+            note.meta["updated"] = self._now_iso()
+            data = await self._io(self._atomic_write, rel, nt.render(note))
+            await self._reindex(rel, data)
+        log.info("note edited in dashboard", extra={"path": rel})
+        return rel
+
+    async def set_pinned(self, path: str, pinned: bool) -> None:
+        rel = nt.normalise_rel(path)
+        note = await self.read(rel)
+        if note is None:
+            raise NoteError(f"{rel} doesn't exist")
+        note.meta["pinned"] = pinned
+        await self.write_raw(rel, nt.render(note))
+
     async def delete(self, path: str) -> bool:
         rel = nt.normalise_rel(path)
         async with self._lock:

@@ -1,0 +1,17 @@
+{% extends "base.html" %}
+{% block title %}{{ path }}{% endblock %}
+{% block content %}
+<p><a href="/memory">← Memory</a></p>
+<h1>{{ note.title or path }} <code>{{ path }}</code></h1>
+<div class="actions">
+  <form method="post" action="/memory/note/pin" class="inline">{{ csrf_input }}<input type="hidden" name="path" value="{{ path }}">
+    <input type="hidden" name="pinned" value="{{ '' if note.pinned else 'on' }}"><button>{{ 'Unpin' if note.pinned else '📌 Pin (always in the prompt)' }}</button></form>
+  <form method="post" action="/memory/note/delete" class="inline" onsubmit="return confirm('Delete {{ path }}?')">{{ csrf_input }}<input type="hidden" name="path" value="{{ path }}"><button class="danger">Delete note</button></form>
+  {% if note.avoid_tags %}<span class="muted small">avoid tags: {{ note.avoid_tags | join(', ') }}</span>{% endif %}
+</div>
+<form method="post" action="/memory/note">{{ csrf_input }}<input type="hidden" name="path" value="{{ path }}">
+  <label>Markdown with frontmatter</label>
+  <textarea name="text" class="tall">{{ text }}</textarea>
+  <div class="actions"><button class="primary">Save & reindex</button></div>
+</form>
+{% endblock %}

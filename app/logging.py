@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import sys
+from collections import deque
 from datetime import UTC, datetime
 
 _RESERVED = set(logging.LogRecord("", 0, "", 0, "", (), None).__dict__) | {"message", "asctime"}
@@ -26,11 +27,29 @@ class JsonFormatter(logging.Formatter):
         return json.dumps(payload, default=str, ensure_ascii=False)
 
 
+class RingBuffer(logging.Handler):
+    """Last N formatted log lines for the dashboard's System → logs tail (§11)."""
+
+    def __init__(self, capacity: int = 500) -> None:
+        super().__init__()
+        self.lines: deque[str] = deque(maxlen=capacity)
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            self.lines.append(self.format(record))
+        except Exception:  # never let logging break the app
+            self.handleError(record)
+
+
+LOG_BUFFER = RingBuffer()
+
+
 def setup_logging(level: str = "INFO") -> None:
     handler = logging.StreamHandler(sys.stdout)
     handler.setFormatter(JsonFormatter())
+    LOG_BUFFER.setFormatter(JsonFormatter())
     root = logging.getLogger()
-    root.handlers[:] = [handler]
+    root.handlers[:] = [handler, LOG_BUFFER]
     root.setLevel(level.upper())
     for noisy in ("httpx", "httpcore", "aiogram.event"):
         logging.getLogger(noisy).setLevel(logging.WARNING)

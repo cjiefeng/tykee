@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **Status** | Draft v1.20 (M4 harvester details: inbox suggestion kinds, per-window cursor) |
+| **Status** | Draft v1.21 (M4 dashboard: security details, raw settings editor, budget DM) |
 | **Name** | Tykee: phonetic spelling of Tyche, the Greek goddess of chance. Telegram handle e.g. `@TykeeBot` (must end in "bot") |
 | **Author** | Jack |
 | **Date** | 2026-10-01 |
@@ -970,6 +970,14 @@ LAN-only at `http://<nas>:8081` (host port 8081 maps to 8080 in the container; 8
 | **System** | Reindex vault, run backup now, download backup, view logs tail. |
 
 All settings are read from SQLite on each request, so changes apply instantly with no restart.
+
+**Implementation notes (M4):**
+- **Security:** requests from outside private ranges (RFC 1918, loopback, link-local, and `100.64.0.0/10` for Tailscale) get 403 before anything else. Login is one argon2id password (`DASHBOARD_PASSWORD_HASH`), with a 5-minute lockout after 5 failures per client. The session cookie is signed with `SESSION_SECRET` (32+ chars), HttpOnly, SameSite=Strict, 7-day max age. Every POST needs the session's CSRF token (form field or `X-CSRF-Token` header for HTMX). Without both secrets the dashboard doesn't start (no default credentials). `python -m app.dashboard.hashpw` generates them. `/healthz` is the only unauthenticated route (LAN-only; used by the M6 healthcheck).
+- **Serving:** uvicorn runs inside the bot's event loop with its own signal handling disabled (aiogram owns SIGTERM) and `proxy_headers` off, so the LAN check sees the real peer address.
+- **Settings:** besides the purpose-built pages, a **Settings** page lists every key as JSON. Every dashboard write is validated against the whole settings set (`RuntimeSettings`) before it's saved, so a typo never reaches the running bot. Persona edits keep the last 20 versions in `persona.history`, restorable from Behaviour.
+- **Restart needed for:** user display names/timezones (users are loaded at startup) and `embedding.precision`.
+- **Budget:** tiles turn amber at `budget.warn_ratio` (0.8) and red at 100%. When a reply hits the cap, the admin gets one Telegram DM per household day (§14.4).
+- **Not built in M4:** the `/think` escalation heuristic (§7.1) has no dashboard control because it doesn't exist yet; `models.escalated` is editable for when it does. Import (M5) and backups (M6) show placeholders.
 
 ---
 

@@ -7,17 +7,24 @@ dependencies = [
   "aiogram>=3.13,<4",
   "anthropic>=1.11,<2",
   "apscheduler>=3.10,<4",
+  "argon2-cffi>=23.1",
   "fastembed>=0.8,<0.9",
+  "fastapi>=0.115",
+  "itsdangerous>=2.2",
+  "jinja2>=3.1",
   "numpy>=2",
   "python-frontmatter>=1.1",
+  "python-multipart>=0.0.9",
   "pydantic>=2.7",
   "pydantic-settings>=2.4",
   "sqlite-vec>=0.1.6",
   "tzdata",
+  "uvicorn>=0.30",
 ]
 
 [dependency-groups]
 dev = [
+  "httpx>=0.27",  # Starlette TestClient
   "mypy>=1.11",
   "pytest>=8",
   "pytest-asyncio>=0.24",

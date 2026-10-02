@@ -1,0 +1,34 @@
+"""Runs the dashboard inside the bot's event loop (one process, §3)."""
+
+from __future__ import annotations
+
+import contextlib
+import logging
+from collections.abc import Iterator
+
+import uvicorn
+from fastapi import FastAPI
+
+log = logging.getLogger(__name__)
+
+
+class _EmbeddedServer(uvicorn.Server):
+    """aiogram owns SIGINT/SIGTERM; the dashboard is stopped via ``should_exit``."""
+
+    @contextlib.contextmanager
+    def capture_signals(self) -> Iterator[None]:
+        yield
+
+
+def make_server(app: FastAPI, host: str, port: int) -> uvicorn.Server:
+    config = uvicorn.Config(
+        app,
+        host=host,
+        port=port,
+        log_config=None,  # our JSON logging stays in charge
+        access_log=False,
+        lifespan="off",
+        proxy_headers=False,  # the client IP must be the real peer for the LAN-only check
+        server_header=False,
+    )
+    return _EmbeddedServer(config)
