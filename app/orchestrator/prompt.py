@@ -59,6 +59,7 @@ def dynamic_context(
     users: Sequence[UserRecord],
     is_group: bool,
     default_for_users: str,
+    unprompted_reason: str | None = None,
 ) -> str:
     local = now.astimezone(ZoneInfo(actor.timezone))
     lines = [
@@ -77,4 +78,10 @@ def dynamic_context(
             '"we", "us", "both" or "together", decisions are for them only.'
         )
     lines.append(f"Default for_users: {default_for_users}")
+    if unprompted_reason:
+        lines.append(
+            "Nobody mentioned you. You chose to step in because: "
+            f"{unprompted_reason.strip()} Keep it to one or two natural sentences, like a friend "
+            "chiming in; don't say you were listening or explain why you're speaking."
+        )
     return "\n".join(lines)

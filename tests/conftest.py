@@ -3,8 +3,8 @@ from __future__ import annotations
 import json
 import random
 import sqlite3
-from collections.abc import AsyncIterator
-from dataclasses import dataclass
+from collections.abc import AsyncIterator, Awaitable, Callable
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -12,12 +12,15 @@ from zoneinfo import ZoneInfo
 import pytest
 from aiogram.types import Chat, Message, MessageEntity, User
 
+from app.ambient.judge import Judge
+from app.ambient.service import AmbientService
 from app.config import parse_allowlist
 from app.db.database import Database
 from app.db.migrate import apply_migrations
 from app.db.repos.users import UserRecord, load_enabled, upsert_allowlist
 from app.decisions.service import DecisionService
 from app.orchestrator.orchestrator import Orchestrator
+from app.orchestrator.summary import Summarizer
 from app.settings import SettingsStore, seed_settings
 from app.telegram.adapter import TelegramAdapter
 from app.telegram.addressing import BotIdentity
@@ -41,6 +44,7 @@ class Env:
     db: Database
     users: list[UserRecord]
     settings: SettingsStore
+    closers: list[Callable[[], Awaitable[None]]] = field(default_factory=list)
 
     @property
     def jack(self) -> UserRecord:
@@ -63,7 +67,10 @@ async def env(tmp_path: Path) -> AsyncIterator[Env]:
         return load_enabled(conn, ALLOWLIST)
 
     users = await db.write(_seed)
-    yield Env(db=db, users=users, settings=SettingsStore(db))
+    e = Env(db=db, users=users, settings=SettingsStore(db))
+    yield e
+    for close in e.closers:
+        await close()
     await db.close()
 
 
@@ -123,6 +130,8 @@ class Stack:
     orchestrator: Orchestrator
     llm: FakeLLMClient
     clock: Clock
+    ambient: AmbientService
+    summarizer: Summarizer
 
 
 def make_stack(env: Env, llm: FakeLLMClient | None = None, seed: int = 7) -> Stack:
@@ -132,6 +141,7 @@ def make_stack(env: Env, llm: FakeLLMClient | None = None, seed: int = 7) -> Sta
     decisions = DecisionService(
         db=env.db, settings=env.settings, users=env.users, clock=clock, rng=random.Random(seed)
     )
+    summarizer = Summarizer(db=env.db, settings=env.settings, llm=llm, users=env.users, tz=TZ)
     orch = Orchestrator(
         db=env.db,
         settings=env.settings,
@@ -139,12 +149,31 @@ def make_stack(env: Env, llm: FakeLLMClient | None = None, seed: int = 7) -> Sta
         decisions=decisions,
         users=env.users,
         tz=TZ,
+        summarizer=summarizer,
+        clock=clock,
+    )
+    ambient = AmbientService(
+        db=env.db,
+        settings=env.settings,
+        judge=Judge(llm),
+        decisions=decisions,
+        summarizer=summarizer,
+        users=env.users,
+        tz=TZ,
         clock=clock,
     )
     adapter = TelegramAdapter(
-        db=env.db, gateway=gw, orchestrator=orch, decisions=decisions, me=BOT, users=env.users
+        db=env.db,
+        gateway=gw,
+        orchestrator=orch,
+        decisions=decisions,
+        ambient=ambient,
+        me=BOT,
+        users=env.users,
+        tz=TZ,
     )
-    return Stack(adapter, gw, decisions, orch, llm, clock)
+    env.closers += [ambient.close, summarizer.close]
+    return Stack(adapter, gw, decisions, orch, llm, clock, ambient, summarizer)
 
 
 async def seed_category(

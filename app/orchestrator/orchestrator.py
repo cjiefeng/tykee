@@ -19,12 +19,14 @@ from anthropic.types import (
 
 from app.db.database import Database
 from app.db.repos import messages as messages_repo
+from app.db.repos import summaries as summaries_repo
 from app.db.repos.users import UserRecord
 from app.decisions.engine import PickRequest
 from app.decisions.service import DecisionService
 from app.llm.client import BudgetExceeded, LLMClient, LLMError, LLMRequest, LLMResponse
 from app.orchestrator.history import build_messages
 from app.orchestrator.prompt import build_system, dynamic_context
+from app.orchestrator.summary import Summarizer
 from app.orchestrator.tools import ToolRouter, TurnContext
 from app.settings import SettingsStore
 from app.timeutil import utcnow
@@ -80,8 +82,10 @@ class Orchestrator:
         decisions: DecisionService,
         users: Sequence[UserRecord],
         tz: ZoneInfo,
+        summarizer: Summarizer | None = None,
         clock: Callable[[], datetime] = utcnow,
     ) -> None:
+        self._summarizer = summarizer
         self._db = db
         self._settings = settings
         self._llm = llm
@@ -92,13 +96,34 @@ class Orchestrator:
         self._tz = tz
         self._clock = clock
 
-    async def respond(self, chat: ChatContext, actor: UserRecord, text: str) -> Reply:
+    async def respond(
+        self,
+        chat: ChatContext,
+        actor: UserRecord,
+        text: str,
+        *,
+        unprompted_reason: str | None = None,
+    ) -> Reply:
+        """``unprompted_reason`` is set when the ambient judge (§10.2) decided to step in."""
+        try:
+            return await self._respond(chat, actor, text, unprompted_reason)
+        finally:
+            if self._summarizer is not None:
+                self._summarizer.schedule(chat.chat_id)
+
+    async def _respond(
+        self, chat: ChatContext, actor: UserRecord, text: str, unprompted_reason: str | None
+    ) -> Reply:
         s = await self._settings.load()
         rows = await self._db.read(
             lambda conn: messages_repo.recent(conn, chat.chat_id, s.history_max_turns)
         )
+        summary = await self._db.read(lambda conn: summaries_repo.get(conn, chat.chat_id))
         messages: list[MessageParam] = build_messages(
-            rows, self._users_by_id, is_group=chat.is_group
+            rows,
+            self._users_by_id,
+            is_group=chat.is_group,
+            summary=summary.text if summary else None,
         )
         if not messages:
             return Reply(FALLBACK_EMPTY, from_llm=False)
@@ -116,6 +141,7 @@ class Orchestrator:
                 users=self._users,
                 is_group=chat.is_group,
                 default_for_users=ctx.default_for_users,
+                unprompted_reason=unprompted_reason,
             ),
         )
         try:

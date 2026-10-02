@@ -5,10 +5,14 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Sequence
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 from aiogram import F, Router
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import CallbackQuery, Message, MessageReactionUpdated, ReactionTypeEmoji
 
+from app.ambient.phrases import parse_duration
+from app.ambient.service import AmbientService
 from app.db.database import Database
 from app.db.repos import messages as messages_repo
 from app.db.repos.users import UserRecord
@@ -42,6 +46,8 @@ In the group, mention me or reply to one of my messages. In a DM, just talk to m
 Commands:
 /pick <category>: random pick from saved options (e.g. /pick dinner)
 /options <category>: list saved options
+/quiet [2h]: in the group, don't chime in unprompted for a while (default 2h)
+/unquiet: allow chiming in again
 /help: this message"""
 
 
@@ -62,9 +68,14 @@ class TelegramAdapter:
         gateway: ChatGateway,
         orchestrator: Orchestrator,
         decisions: DecisionService,
+        ambient: AmbientService,
         me: BotIdentity,
         users: Sequence[UserRecord],
+        tz: ZoneInfo,
     ) -> None:
+        self._ambient = ambient
+        self._tz = tz
+        ambient.responder = self.respond_unprompted
         self._db = db
         self._gateway = gateway
         self._orchestrator = orchestrator
@@ -82,6 +93,10 @@ class TelegramAdapter:
         @router.callback_query(F.data.startswith("d:"))
         async def _on_callback(callback: CallbackQuery, actor: UserRecord) -> None:
             await self.handle_callback(callback, actor)
+
+        @router.message_reaction()
+        async def _on_reaction(reaction: MessageReactionUpdated, actor: UserRecord) -> None:
+            await self.handle_reaction(reaction)
 
         return router
 
@@ -107,8 +122,18 @@ class TelegramAdapter:
         if row_id is None:
             return  # duplicate delivery
 
-        if is_group and not is_addressed(msg, self._me):
+        addressed = not is_group or is_addressed(msg, self._me)
+        if is_group and kind == "text":
+            if await self._ambient.is_mute_request(text):
+                until = await self._ambient.mute(chat_id)
+                await self._send(chat_id, self._quiet_text(until), store=False)
+                return
+            await self._ambient.check_negative_text(chat_id, text)
+        if not addressed:
+            await self._ambient.on_chatter(chat_id, row_id, actor, kind, text)
             return
+        if is_group:
+            self._ambient.cancel(chat_id)
         log.info("addressed", extra={"chat_id": chat_id, "user": actor.slug, "group": is_group})
         chat = ChatContext(chat_id, is_group)
         cmd = parse_command(msg.text, self._me.username)
@@ -133,14 +158,14 @@ class TelegramAdapter:
         reply_to: int | None = None,
         picks: Sequence[tuple[int, str]] = (),
         store: bool = True,
-    ) -> None:
+    ) -> list[int]:
         ids = await self._gateway.send_text(
             chat_id, text, reply_to=reply_to, keyboard=decision_keyboard(picks)
         )
         if ids and picks:
             await self._decisions.attach_message([d for d, _ in picks], chat_id, ids[-1])
         if not store:
-            return
+            return ids
         content = messages_repo.text_content(text)
         await self._db.write(
             lambda conn: messages_repo.insert(
@@ -153,6 +178,7 @@ class TelegramAdapter:
                 content=content,
             )
         )
+        return ids
 
     # --- commands ------------------------------------------------------------------------------
 
@@ -165,6 +191,8 @@ class TelegramAdapter:
             await self._cmd_pick(cmd.args, chat, actor)
         elif cmd.name == "options":
             await self._cmd_options(cmd.args, chat)
+        elif cmd.name in ("quiet", "unquiet"):
+            await self._cmd_quiet(cmd, chat)
         else:
             await self._send(chat.chat_id, HELP_TEXT, store=False)
 
@@ -204,6 +232,56 @@ class TelegramAdapter:
             lines = [f"• {o.name}" + (f" ({', '.join(o.tags)})" if o.tags else "") for o in options]
             text = f"**{category.display_name}** options:\n" + "\n".join(lines)
         await self._send(chat.chat_id, text, store=False)
+
+    def _quiet_text(self, until: datetime) -> str:
+        local = until.astimezone(self._tz)
+        when = (
+            f"{local:%H:%M}"
+            if local.date() == datetime.now(self._tz).date()
+            else f"{local:%a %H:%M}"
+        )
+        return f"🤐 OK, I'll stay quiet until {when} unless you mention me. /unquiet to undo."
+
+    async def _cmd_quiet(self, cmd: Command, chat: ChatContext) -> None:
+        if not chat.is_group:
+            await self._send(
+                chat.chat_id,
+                "Quiet mode is for the group. Here I only talk when you message me.",
+                store=False,
+            )
+            return
+        if cmd.name == "unquiet":
+            await self._ambient.unmute(chat.chat_id)
+            await self._send(chat.chat_id, "👋 I'm back. I'll chime in when it helps.", store=False)
+            return
+        try:
+            duration = parse_duration(cmd.args) if cmd.args else None
+        except ValueError:
+            await self._send(chat.chat_id, "Usage: /quiet [30m | 2h | 1d]", store=False)
+            return
+        until = await self._ambient.mute(chat.chat_id, duration)
+        await self._send(chat.chat_id, self._quiet_text(until), store=False)
+
+    # --- unprompted replies (§10.2) ------------------------------------------------------------
+
+    async def respond_unprompted(
+        self, chat_id: int, actor: UserRecord, text: str, reason: str
+    ) -> int | None:
+        """Called by the ambient service after the judge says to speak. Never sends fallback
+        text: if Claude couldn't produce a reply, staying silent is better than 'brain offline'."""
+        chat = ChatContext(chat_id, is_group=True)
+        reply = await self._orchestrator.respond(chat, actor, text, unprompted_reason=reason)
+        if not reply.from_llm and not reply.picks:
+            return None
+        ids = await self._send(chat_id, reply.text, picks=reply.picks, store=reply.from_llm)
+        return ids[0] if ids else None
+
+    # --- reactions -----------------------------------------------------------------------------
+
+    async def handle_reaction(self, reaction: MessageReactionUpdated) -> None:
+        emojis = {r.emoji for r in reaction.new_reaction if isinstance(r, ReactionTypeEmoji)}
+        if emojis:
+            await self._ambient.on_reaction(reaction.chat.id, reaction.message_id, emojis)
 
     # --- button callbacks ----------------------------------------------------------------------
 

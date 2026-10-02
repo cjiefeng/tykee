@@ -46,6 +46,18 @@ class RuntimeSettings(BaseModel):
     budget_daily_usd: float = 1.0
     budget_monthly_usd: float = 15.0
     decisions_session_hours: float = 6.0
+    ambient_enabled: bool = True
+    ambient_debounce_s: float = 30.0
+    ambient_threshold: float = 0.75
+    ambient_cooldown_min: float = 20.0
+    ambient_max_per_day: int = 5
+    ambient_window_messages: int = 20
+    ambient_default_mute_min: float = 120.0
+    ambient_negative_window_min: float = 15.0
+    ambient_negative_phrases: list[str] = Field(default_factory=list)
+    ambient_mute_phrases: list[str] = Field(default_factory=list)
+    ambient_judge_prompt: str = ""
+    summary_batch: int = 20
 
     def model_for(self, role: ModelRole) -> str:
         return str(getattr(self.models, role))
@@ -70,6 +82,7 @@ def seed_values() -> dict[str, Any]:
     raw: dict[str, Any] = json.loads((SEED_DIR / "settings.json").read_text(encoding="utf-8"))
     values = {k: v for k, v in raw.items() if not k.startswith("_")}
     values["persona.system_prompt"] = (SEED_DIR / "persona.md").read_text(encoding="utf-8").strip()
+    values["ambient.judge_prompt"] = (SEED_DIR / "judge.md").read_text(encoding="utf-8").strip()
     return values
 
 

@@ -44,10 +44,16 @@ All tooling runs inside Docker (no local Python/uv needed).
   engine (§8.2–8.3 weighting/sampling; pure math split from DB code), feedback (§8.4), and
   `DecisionService`, the async façade used by tools, commands, callbacks and fallback.
 - `app/orchestrator/`: prompt assembly (§7.2), history replay, Claude tool loop (max 6
-  iterations, then `tool_choice: none`), tool schemas + router in `tools.py`, fallback (§8.5).
+  iterations, then `tool_choice: none`), tool schemas + router in `tools.py`, fallback (§8.5),
+  rolling chat summaries (`summary.py`, background, one run per chat at a time).
+- `app/ambient/`: speak-or-stay-silent (§10.2). `rules.py` (pure stage-1), `debounce.py`
+  (per-chat timers, in memory), `judge.py` (structured-output call), `state.py`
+  (`chat_state`/`ambient_log`), `phrases.py` (mute/negative cues, `/quiet` durations),
+  `service.py` (`AmbientService` ties it together; the adapter is its `responder`).
 - `tests/fakes/`: `FakeLLMClient` (scripted text / `tool_call(...)` / exceptions), `FakeGateway`.
   `tests/conftest.py`: migrated temp DB (`env`), `make_stack()` wiring the whole bot with fakes,
-  `seed_category()`.
+  `seed_category()`. Ambient tests call `stack.ambient.fire(chat_id)` directly instead of
+  waiting for the debounce; background tasks are closed via `env.closers`.
 
 ## Conventions
 

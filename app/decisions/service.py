@@ -9,6 +9,7 @@ import sqlite3
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 
 from app.db.database import Database
 from app.db.repos.users import UserRecord
@@ -18,7 +19,7 @@ from app.decisions.categories import Category, ResolveResult
 from app.decisions.engine import PickRequest, PickResult
 from app.decisions.feedback import Action, FeedbackResult
 from app.settings import SettingsStore
-from app.timeutil import from_sql, to_sql, utcnow
+from app.timeutil import from_sql, local_day_start, to_sql, utcnow
 
 
 @dataclass(frozen=True)
@@ -196,3 +197,16 @@ class DecisionService:
             ).fetchall()
         )
         return [(r["id"], r["choice_text"]) for r in rows]
+
+    async def today(self, chat_id: int, tz: ZoneInfo) -> list[tuple[str, str, str]]:
+        """(category, choice, status) for decisions made in this chat since local midnight."""
+        since = to_sql(local_day_start(self._clock(), tz))
+        rows = await self._db.read(
+            lambda c: c.execute(
+                "SELECT c.display_name, d.choice_text, d.status FROM decisions d "
+                "JOIN categories c ON c.id = d.category_id "
+                "WHERE d.chat_id IS ? AND d.created_at >= ? ORDER BY d.id",
+                (chat_id, since),
+            ).fetchall()
+        )
+        return [(r[0], r[1], r[2]) for r in rows]

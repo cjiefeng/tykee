@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **Status** | Draft v1.12 (forum topic restriction to #Tykee, M4, §10.4) |
+| **Status** | Draft v1.13 (M2b ambient details: stage-1 order, cues in code, summaries) |
 | **Name** | Tykee: phonetic spelling of Tyche, the Greek goddess of chance. Telegram handle e.g. `@TykeeBot` (must end in "bot") |
 | **Author** | Jack |
 | **Date** | 2026-10-01 |
@@ -304,7 +304,8 @@ CREATE TABLE chat_state (
   muted_until          TEXT,
   last_unprompted_at   TEXT,
   unprompted_today     INTEGER NOT NULL DEFAULT 0,
-  cooldown_multiplier  REAL NOT NULL DEFAULT 1.0     -- doubled on negative feedback, reset daily
+  cooldown_multiplier  REAL NOT NULL DEFAULT 1.0,    -- doubled on negative feedback, reset daily
+  state_day            TEXT                          -- household-TZ date the daily counters belong to (0003)
 );
 
 CREATE TABLE ambient_log (
@@ -317,6 +318,7 @@ CREATE TABLE ambient_log (
   reason         TEXT,
   confidence     REAL,
   feedback       TEXT,                               -- NULL | 'negative' | 'positive'
+  reply_tg_message_id INTEGER,                       -- bot message sent for 'respond' (0003), target of 👎/👍
   created_at     TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
@@ -534,7 +536,7 @@ Prompt caching on [1]–[3] keeps per-message cost low because they're identical
 
 **History replay:** tool calls and results are persisted (`role='tool'`, for the dashboard's conversation view) but **not replayed**. Only user text and the assistant's final text go into [5]: cheaper, and no risk of orphaned `tool_use`/`tool_result` pairs. The API has no `tool` role; it's an internal label. In groups, consecutive messages from users are collapsed into one user turn with speaker prefixes (`[jack] …\n[partner] …`).
 
-**Rolling summary:** when unsummarised turns exceed N, the oldest overflow is summarised (Haiku-tier, `purpose='summary'`) into `chat_summaries`. Implemented in M2b; M1 replays the last N turns only.
+**Rolling summary:** once at least `summary.batch` (default 20) messages have fallen out of the last-N replay window, they are folded into `chat_summaries` together with the previous summary (one `models.default` call, `purpose='summary'`, ≤ 150 words). It runs in the background after replies and judge calls, at most once at a time per chat, so it never adds reply latency. The summary is prepended to the first replayed user turn ([5]) and given to the judge.
 
 ### 7.3 Tools exposed to Claude
 
@@ -729,20 +731,23 @@ The bot behaves like a quiet friend in the chat: it listens, and only speaks whe
 
 | Situation | Action |
 |---|---|
-| @mention, reply to a bot message, or `/command` | **Always respond** (skips stage 2 and the cooldown) |
-| Group is muted (`/quiet`, or "bot shh" understood earlier) | Silent until mute expires (still logs messages) |
-| Unprompted cooldown active (bot spoke unprompted < `ambient.cooldown_min`, default 20 min, ago) | Silent |
+| @mention, reply to a bot message, or `/command` | **Always respond** (skips stage 2 and the cooldown, even when muted); cancels any pending burst |
+| `ambient.enabled` is false | Silent (rule `disabled`) |
+| Group is muted (`/quiet`, or a mute phrase such as "bot shh") | Silent until mute expires (still logs messages) |
+| Unprompted cooldown active (bot spoke unprompted < `ambient.cooldown_min` × `cooldown_multiplier`, default 20 min, ago) | Silent |
 | Daily unprompted cap reached (`ambient.max_per_day`, default 5) | Silent |
-| Message is only a sticker/photo/emoji | Silent |
+| The burst contains only stickers/photos/emoji/voice | Silent (rule `media_only`) |
+
+Rules are evaluated in that order when the debounce timer fires (not per message), so the state at judging time counts. Every burst produces one `ambient_log` row: `skipped_rule` (with the rule name; also `budget` and `judge_error`), `silent`, or `respond`. Ambient participation applies to the group only; DMs always get a reply.
 
 **Stage 2: debounce, then a cheap judgement call**
 
-1. **Debounce:** people type in bursts, so wait until the group has been quiet for `ambient.debounce_s` (default 30 s) and judge the whole burst at once, not every line.
-2. **Judge:** one Haiku-tier call with the last ~20 group messages, pinned constraint notes, and today's decisions. It returns structured output:
+1. **Debounce:** people type in bursts, so wait until the group has been quiet for `ambient.debounce_s` (default 30 s) and judge the whole burst at once, not every line. Pending bursts live in memory; a restart drops them (the next message starts a new burst).
+2. **Judge:** one Haiku-tier call (`models.judge`, structured output via `output_config.format`) with the last `ambient.window_messages` (default 20) group messages, a `--- new ---` marker before the burst, the rolling chat summary, today's decisions, and (from M3) pinned constraint notes. It returns:
    ```json
    {"action": "respond" | "silent", "reason": "string", "confidence": 0.0}
    ```
-3. Respond only if `action == "respond"` **and** `confidence ≥ ambient.threshold` (default 0.75). Then run the normal orchestrator flow (§9) to produce the reply.
+3. Respond only if `action == "respond"` **and** `confidence ≥ ambient.threshold` (default 0.75). Then run the normal orchestrator flow (§9) to produce the reply, with the judge's reason added to the dynamic context ("nobody mentioned you; you chose to step in because…"). The reply is not quoted (no `reply_to`). If the orchestrator can't produce a real reply (Claude down, budget), nothing is sent: an unprompted "my brain's offline" is worse than silence. Invalid judge output is treated as silence.
 
 **Judge guidelines (in its prompt, editable in dashboard):**
 
@@ -756,8 +761,9 @@ The bot behaves like a quiet friend in the chat: it listens, and only speaks whe
 
 **Feedback loop:**
 - Every judge decision is logged (`ambient_log` table: message window, action, reason, confidence) and viewable in the dashboard, so thresholds can be tuned against what actually happened.
-- If someone reacts 👎 to an unprompted bot message, or says "not now"/"didn't ask", that's logged as a false positive and the cooldown doubles for the rest of the day.
-- "Bot keep quiet" / `/quiet 2h` mutes; `/unquiet` lifts it.
+- If someone reacts 👎 to an unprompted bot message, or says "not now"/"didn't ask" within `ambient.negative_window_min` (default 15) of one, that's logged as a false positive and the cooldown doubles for the rest of the day (once per unprompted message). 👍 is logged as `positive`.
+- A mute phrase ("bot shh", "bot keep quiet", …) or `/quiet [duration]` mutes; `/unquiet` lifts it. Default duration `ambient.default_mute_min` (120); `/quiet` accepts `30m`, `2h`, `1d`, bare minutes; capped at 7 days.
+- Negative and mute cues are matched **in code** (normalised whole-phrase match against the editable lists `ambient.negative_phrases` / `ambient.mute_phrases`), not by Claude: they must work even when Claude is unavailable, and they cost nothing.
 
 **Cost:** the judge runs once per burst, not per message, on Haiku-tier with the static prompt prefix cached. For a couple's group chat this is plausibly tens of calls per day, i.e. cents. It is still counted in `usage` and the budget caps; when the budget is exhausted ambient mode switches off and only direct mentions get (fallback) answers.
 

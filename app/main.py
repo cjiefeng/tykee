@@ -15,6 +15,8 @@ from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.exceptions import TelegramUnauthorizedError
 
+from app.ambient.judge import Judge
+from app.ambient.service import AmbientService
 from app.config import Env
 from app.db.database import Database
 from app.db.migrate import apply_migrations
@@ -23,6 +25,7 @@ from app.decisions.service import DecisionService
 from app.llm.client import AnthropicLLMClient
 from app.logging import setup_logging
 from app.orchestrator.orchestrator import Orchestrator
+from app.orchestrator.summary import Summarizer
 from app.settings import SettingsStore, seed_settings
 from app.telegram.adapter import TelegramAdapter
 from app.telegram.addressing import BotIdentity
@@ -93,22 +96,36 @@ async def run(env: Env) -> None:
         )
         if not llm.configured:
             log.warning("ANTHROPIC_API_KEY not set: running in fallback mode")
+        tz = ZoneInfo(env.tz)
         decisions = DecisionService(db=db, settings=settings, users=users)
+        summarizer = Summarizer(db=db, settings=settings, llm=llm, users=users, tz=tz)
         orchestrator = Orchestrator(
             db=db,
             settings=settings,
             llm=llm,
             decisions=decisions,
             users=users,
-            tz=ZoneInfo(env.tz),
+            tz=tz,
+            summarizer=summarizer,
+        )
+        ambient = AmbientService(
+            db=db,
+            settings=settings,
+            judge=Judge(llm),
+            decisions=decisions,
+            summarizer=summarizer,
+            users=users,
+            tz=tz,
         )
         adapter = TelegramAdapter(
             db=db,
             gateway=gateway,
             orchestrator=orchestrator,
             decisions=decisions,
+            ambient=ambient,
             me=me,
             users=users,
+            tz=tz,
         )
         dp = Dispatcher()
         dp.update.outer_middleware(
@@ -116,7 +133,11 @@ async def run(env: Env) -> None:
         )
         dp.include_router(adapter.router())
         log.info("polling", extra={"bot": me.username})
-        await dp.start_polling(bot, allowed_updates=ALLOWED_UPDATES)
+        try:
+            await dp.start_polling(bot, allowed_updates=ALLOWED_UPDATES)
+        finally:
+            await ambient.close()
+            await summarizer.close()
     finally:
         await bot.session.close()
         await db.close()
