@@ -13,6 +13,7 @@ from aiogram.types import (
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     LinkPreviewOptions,
+    ReactionTypeEmoji,
     ReplyParameters,
 )
 from aiogram.utils.chat_action import ChatActionSender
@@ -46,6 +47,10 @@ class ChatGateway(Protocol):
         ...
 
     async def answer_callback(self, callback_id: str, text: str) -> None: ...
+
+    async def set_reaction(self, chat_id: int, message_id: int, emoji: str) -> None:
+        """React to a message (§10.5: a recorded place is confirmed quietly). Best effort."""
+        ...
 
     def typing(
         self, chat_id: int, thread_id: int | None = None
@@ -114,6 +119,14 @@ class AiogramGateway:
             await self._bot.answer_callback_query(callback_id, text=text)
         except TelegramAPIError:
             log.debug("answer_callback_query failed")
+
+    async def set_reaction(self, chat_id: int, message_id: int, emoji: str) -> None:
+        try:
+            await self._bot.set_message_reaction(
+                chat_id, message_id, reaction=[ReactionTypeEmoji(emoji=emoji)]
+            )
+        except TelegramAPIError as e:
+            log.warning("set_message_reaction failed", extra={"error": str(e)})
 
     def typing(
         self, chat_id: int, thread_id: int | None = None

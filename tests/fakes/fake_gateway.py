@@ -25,6 +25,7 @@ class FakeGateway:
     typing_in: list[int] = field(default_factory=list)
     keyboards: dict[int, Keyboard | None] = field(default_factory=dict)  # message_id → current
     toasts: list[str] = field(default_factory=list)
+    reactions: list[tuple[int, int, str]] = field(default_factory=list)  # (chat, message, emoji)
     fail_threads: set[int] = field(default_factory=set)  # sends into these threads raise
     fail_error: str = "Bad Request: message thread not found"  # or "Bad Request: TOPIC_CLOSED"
     _next_id: int = 1000
@@ -68,6 +69,9 @@ class FakeGateway:
 
     async def answer_callback(self, callback_id: str, text: str) -> None:
         self.toasts.append(text)
+
+    async def set_reaction(self, chat_id: int, message_id: int, emoji: str) -> None:
+        self.reactions.append((chat_id, message_id, emoji))
 
     def typing(
         self, chat_id: int, thread_id: int | None = None

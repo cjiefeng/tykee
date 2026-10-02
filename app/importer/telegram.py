@@ -18,6 +18,8 @@ from zoneinfo import ZoneInfo
 
 import ijson
 
+from app.places.links import is_maps_link
+
 ExportFormat = Literal["single", "account"]
 
 MAX_JSON_BYTES = 500 * 1024 * 1024  # zip-bomb guard (§15.1)
@@ -204,15 +206,22 @@ def _walk(path: Path) -> Iterator[tuple[ExportFormat, _Chat, dict[str, Any]]]:
         raise ExportError("this JSON isn't a Telegram export (no messages or chats)")
 
 
+def _part(part: str | dict[str, Any]) -> str:
+    if isinstance(part, str):
+        return part
+    text = str(part.get("text", ""))
+    href = str(part.get("href") or "")
+    # A Maps link hidden behind link text is kept so it can be resolved (§10.5).
+    if part.get("type") == "text_link" and is_maps_link(href) and href not in text:
+        return f"{text} ({href})"
+    return text
+
+
 def _flatten(text: Any) -> str:
     if isinstance(text, str):
         return text
     if isinstance(text, list):
-        return "".join(
-            part if isinstance(part, str) else str(part.get("text", ""))
-            for part in text
-            if isinstance(part, str | dict)
-        )
+        return "".join(_part(part) for part in text if isinstance(part, str | dict))
     return ""
 
 

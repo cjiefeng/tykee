@@ -104,6 +104,7 @@ by hand otherwise; the bot is its only writer.
 | Rotate Anthropic key | Console → new key, update `.env`, `./deploy.sh`, delete the old key |
 | Change dashboard password | `docker compose exec tykee python -m app.dashboard.hashpw`, put both values in `.env` (single-quote the hash), `./deploy.sh`. A new `SESSION_SECRET` logs everyone out |
 | Restart without redeploying | `docker compose restart tykee` |
+| Fix a place (typo, duplicate, someone's home slipped through) | Memory → Places: rename, merge into the right one, or delete (removes its note too) |
 
 Changes to user names/timezones and `embedding.precision` need a restart; everything else applies
 immediately.
@@ -121,6 +122,8 @@ immediately.
 | Startup error after deploy | `deploy.sh` prints the logs and the rollback command. |
 | `cannot write to /data` | Data dir ownership → `sudo chown -R 1000:1000 "$TYKEE_DATA_DIR"`. |
 | Backups tile amber/red | System page shows the last error. Disk full? `df -h /volume_nvme`. |
+| Maps links not recognised (Memory → Places shows `failed`) | The NAS needs outbound HTTPS to `maps.app.goo.gl`; check DNS/egress. Failed links get one retry after 6 h. `blocked_host` means Google redirected somewhere off the allowlist: expected for non-Maps links. |
+| "Eating here" + link gets no 👌 | Only in the answer topic, and only if the category from the message or the meal slot exists (Memory → Places → meal slots). Logs say `shared place: no category`. |
 | Vault commit "has a remote" | Someone added a git remote to the vault → `git -C vault remote remove <name>`. Memory must never be pushed anywhere (§12). |
 
 ## Two-week unattended check (M6)

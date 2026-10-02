@@ -50,6 +50,8 @@ from app.llm.client import (
     LLMRequest,
     budget_status,
 )
+from app.places import links as place_links
+from app.places.service import PlaceService, candidate_from
 from app.settings import SettingsStore
 from app.timeutil import from_sql, to_sql, utcnow
 
@@ -61,6 +63,7 @@ MAX_WINDOW_ATTEMPTS = 3
 MAX_CONSOLIDATE_ATTEMPTS = 3
 BATCH_LIMIT = 10_000
 SAMPLE_LINES = 12
+PLACE_FETCH_INTERVAL_S = 1.0  # §10.5: Maps short links are resolved at most 1 request/s
 
 
 class DuplicateUpload(ImportProblem):
@@ -100,8 +103,11 @@ class ImportService:
         users: Sequence[UserRecord],
         tz: ZoneInfo,
         imports_dir: Path,
+        places: PlaceService | None = None,
         clock: Callable[[], datetime] = utcnow,
     ) -> None:
+        self._places = places
+        self.place_interval_s = PLACE_FETCH_INTERVAL_S
         self._db = db
         self._settings = settings
         self._llm = llm
@@ -472,6 +478,14 @@ class ImportService:
                 results = await self._batches.batch_results(batch_id, template)
                 await self._collect(job, batch_id, results)
         if pending and not submitted:
+            if await self._resolve_places(job, pending):
+                pending = await self._db.read(
+                    lambda c: c.execute(
+                        "SELECT id, chat_ref, text FROM import_windows "
+                        "WHERE job_id = ? AND status = 'pending' ORDER BY ord",
+                        (job.id,),
+                    ).fetchall()
+                )
             names = job.chat_names
             for start in range(0, len(pending), BATCH_LIMIT):
                 chunk = pending[start : start + BATCH_LIMIT]
@@ -488,6 +502,55 @@ class ImportService:
         counts = await self._db.read(lambda c: jobs.window_counts(c, job.id))
         if not counts.get("pending") and not counts.get("submitted"):
             await self._finish_extraction(job)
+
+    async def _resolve_places(self, job: Job, pending: Sequence[sqlite3.Row]) -> bool:
+        """§10.5 import enhancement: resolve Maps links before extraction so Opus sees shop
+        names, rate-limited and cached. Unnamed locations (homes, addresses) lose their link.
+        The links are kept in the job so ``apply`` can turn reviewed choices into places."""
+        s = await self._settings.load()
+        if self._places is None or not s.places_enabled:
+            return False
+        resolver = self._places.resolver
+        loop = asyncio.get_running_loop()
+        last_fetch = 0.0
+        seen: list[str] = list(job.meta.get("place_urls") or [])
+        changed: list[tuple[str, int]] = []
+        for r in pending:
+            text = r["text"] or ""
+            new = text
+            for url in place_links.urls_in_text(text):
+                if f"{url} ⟦" in new:
+                    continue  # annotated on an earlier tick
+                if place_links.is_short_link(url) and await resolver.cached(url) is None:
+                    wait = self.place_interval_s - (loop.time() - last_fetch)
+                    if wait > 0:
+                        await asyncio.sleep(wait)
+                    last_fetch = loop.time()
+                res = await resolver.resolve(url)
+                p = res.parsed
+                if res.status == "resolved" and p is not None and p.name is not None:
+                    marker = place_links.annotation(p.name, address=p.address, lat=p.lat, lng=p.lng)
+                    new = new.replace(url, f"{url} {marker}")
+                    if url not in seen:
+                        seen.append(url)
+                elif res.status == "unnamed":
+                    new = new.replace(url, place_links.LOCATION_SHARED)
+            if new != text:
+                changed.append((new, r["id"]))
+        if not changed:
+            return False
+
+        def _save(c: sqlite3.Connection) -> None:
+            c.executemany("UPDATE import_windows SET text = ? WHERE id = ?", changed)
+            jobs.update(
+                c,
+                job.id,
+                meta_json=json.dumps({**job.meta, "place_urls": seen}, ensure_ascii=False),
+            )
+
+        await self._db.write(_save)
+        log.info("import places resolved", extra={"job_id": job.id, "windows": len(changed)})
+        return True
 
     async def _collect(self, job: Job, batch_id: str, results: Sequence[Any]) -> None:
         by_id = {r.custom_id: r for r in results}
@@ -781,6 +844,7 @@ class ImportService:
         try:
             summary = await self._db.write(lambda c: self._apply_rows(c, job_id))
             summary["notes"] = await self._apply_notes(job_id)
+            summary["places"] = await self._apply_places(job_id)
         except Exception:
             await self._db.write(lambda c: jobs.update(c, job_id, status="review"))
             raise
@@ -909,6 +973,21 @@ class ImportService:
             )
             await self._db.write(functools.partial(_mark_applied, it=it))
         return len(notes)
+
+    async def _apply_places(self, job_id: int) -> int:
+        """Links resolved before extraction become places when an applied option or decision
+        names them (§10.5): reviewed content only, named businesses only."""
+        if self._places is None:
+            return 0
+        job = await self.job(job_id)
+        count = 0
+        for url in job.meta.get("place_urls") or []:
+            res = await self._places.resolver.cached(str(url))
+            if res is None or res.status != "resolved" or res.parsed is None:
+                continue
+            if await self._places.adopt(candidate_from(res.parsed, str(url)), str(url)):
+                count += 1
+        return count
 
 
 def _mark_submitted(c: sqlite3.Connection, batch_id: str, ids: Sequence[int]) -> None:

@@ -44,7 +44,14 @@ def register(memory: MemoryService, decisions: DecisionService) -> None:
         name = str(p.get("name", "")).strip()
         if category is None or not name:
             return
-        await decisions.add_option(category, name, [str(t) for t in p.get("tags") or []], "shared")
+        place = p.get("place_id")
+        await decisions.add_option(
+            category,
+            name,
+            [str(t) for t in p.get("tags") or []],
+            "shared",
+            place_id=int(place) if isinstance(place, int) else None,
+        )
 
     memory.appliers["category"] = apply_category
     memory.appliers["option"] = apply_option

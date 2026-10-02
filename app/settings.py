@@ -96,6 +96,101 @@ class WebToolVersions(BaseModel):
     web_fetch: str = Field(min_length=1, pattern=r"^web_fetch_\d{8}$")
 
 
+# Emoji a bot may react with (Bot API ReactionTypeEmoji); anything else fails REACTION_INVALID.
+TELEGRAM_REACTIONS = frozenset(
+    [
+        "❤",
+        "👍",
+        "👎",
+        "🔥",
+        "🥰",
+        "👏",
+        "😁",
+        "🤔",
+        "🤯",
+        "😱",
+        "🤬",
+        "😢",
+        "🎉",
+        "🤩",
+        "🤮",
+        "💩",
+        "🙏",
+        "👌",
+        "🕊",
+        "🤡",
+        "🥱",
+        "🥴",
+        "😍",
+        "🐳",
+        "❤\u200d🔥",
+        "🌚",
+        "🌭",
+        "💯",
+        "🤣",
+        "⚡",
+        "🍌",
+        "🏆",
+        "💔",
+        "🤨",
+        "😐",
+        "🍓",
+        "🍾",
+        "💋",
+        "🖕",
+        "😈",
+        "😴",
+        "😭",
+        "🤓",
+        "👻",
+        "👨\u200d💻",
+        "👀",
+        "🎃",
+        "🙈",
+        "😇",
+        "😨",
+        "🤝",
+        "✍",
+        "🤗",
+        "🫡",
+        "🎅",
+        "🎄",
+        "☃",
+        "💅",
+        "🤪",
+        "🗿",
+        "🆒",
+        "💘",
+        "🙉",
+        "🦄",
+        "😘",
+        "💊",
+        "🙊",
+        "😎",
+        "👾",
+        "🤷\u200d♂",
+        "🤷",
+        "🤷\u200d♀",
+        "😡",
+    ]
+)
+
+
+class MealSlot(BaseModel):
+    """§10.5: a shared place + "eating here" between ``start`` and ``end`` (household time) is a
+    decision in ``category``, unless the message names a category itself. Wraps midnight when
+    ``end`` < ``start``."""
+
+    start: str
+    end: str
+    category: str = Field(min_length=1, max_length=60)
+
+    @field_validator("start", "end")
+    @classmethod
+    def _time(cls, value: str) -> str:
+        return _hhmm(value)
+
+
 def _domains(value: list[str]) -> list[str]:
     out = [d.strip().lower() for d in value if d.strip()]
     if any("://" in d or " " in d for d in out):
@@ -155,6 +250,19 @@ class RuntimeSettings(BaseModel):
     web_blocked_domains: list[str] = Field(default_factory=list)
     web_tool_versions: WebToolVersions | None = None  # None → web tools stay off
     pricing_web_search: float = Field(0.0, ge=0)  # USD per search (`pricing.web_search`)
+    places_enabled: bool = True
+    places_reaction: str = "👌"
+    places_intent_phrases: list[str] = Field(default_factory=list)
+    places_intent_window_s: int = Field(120, ge=0, le=3600)
+    places_meal_slots: list[MealSlot] = Field(default_factory=list)
+
+    @field_validator("places_reaction")
+    @classmethod
+    def _reaction(cls, value: str) -> str:
+        value = value.strip().replace("\ufe0f", "")
+        if value not in TELEGRAM_REACTIONS:
+            raise ValueError("places.reaction must be an emoji Telegram allows bots to react with")
+        return value
 
     @field_validator("web_allowed_domains", "web_blocked_domains")
     @classmethod

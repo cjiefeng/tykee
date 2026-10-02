@@ -134,6 +134,7 @@ async def dash(env: Env) -> AsyncIterator[Dash]:
             health=stack.health,
             clock=stack.clock,
         ),
+        places=stack.places,
     )
     async with _client(create_app(deps)) as client:
         yield Dash(client, stack, deps)
@@ -237,6 +238,7 @@ async def test_every_page_renders(dash: Dash, env: Env) -> None:
         "/memory/note?path=people/jack.md",
         "/memory/inbox",
         "/memory/inbox?status=approved",
+        "/memory/places",
         "/conversations",
         f"/conversations/{GROUP_ID}",
         "/users",
@@ -475,6 +477,48 @@ async def test_inbox_approve_via_htmx_and_suggestion(dash: Dash, env: Env) -> No
     assert await dash.stack.store.exists("memories/jack/drinks")
     await dash.post(f"/memory/inbox/{sugg.id}", {"action": "approve"})
     assert await dash.stack.decisions.lookup("board game") is not None
+
+
+async def test_places_page_actions_and_settings(dash: Dash, env: Env) -> None:
+    from app.places.service import Candidate
+
+    places = dash.stack.places
+    a = await places.upsert(Candidate("Keisuke Tonkotsu King", "https://maps.app.goo.gl/a"))
+    b = await places.upsert(Candidate("Keisuke Ramen", "https://maps.app.goo.gl/b"))
+    await dash.login()
+    page = (await dash.client.get("/memory/places")).text
+    assert "Keisuke Tonkotsu King" in page and "shared/places/keisuke-ramen.md" in page
+    assert "👌" in page  # the reaction setting's current value
+
+    await dash.post(f"/memory/places/{a.id}/rename", {"name": "Keisuke (Tras)"})
+    assert (await places.get(a.id)).name == "Keisuke (Tras)"  # type: ignore[union-attr]
+    await dash.post(f"/memory/places/{b.id}/merge", {"into": str(a.id)})
+    assert await places.get(b.id) is None
+    r = await dash.post(f"/memory/places/{a.id}/merge", {"into": str(a.id)})
+    assert "into itself" in await dash.flash("/memory/places") and r.status_code == 303
+    await dash.post(f"/memory/places/{a.id}/delete")
+    assert await places.all() == []
+
+    form = {
+        "places.enabled": "on",
+        "places.reaction": "🫡",
+        "places.intent_window_s": "60",
+        "places.intent_phrases": "eating here\nmakan here\n",
+        "places.meal_slots": "11:00-14:30 lunch\n18:00-22:00 dinner",
+    }
+    await dash.post("/memory/places/settings", form)
+    s = await env.settings.load()
+    assert (s.places_reaction, s.places_intent_window_s) == ("🫡", 60)
+    assert s.places_intent_phrases == ["eating here", "makan here"]
+    assert [(m.start, m.end, m.category) for m in s.places_meal_slots] == [
+        ("11:00", "14:30", "lunch"),
+        ("18:00", "22:00", "dinner"),
+    ]
+    await dash.post("/memory/places/settings", {**form, "places.reaction": "📍"})
+    assert "Not saved" in await dash.flash("/memory/places")
+    assert (await env.settings.load()).places_reaction == "🫡"  # 📍 isn't a bot reaction
+    await dash.post("/memory/places/settings", {**form, "places.meal_slots": "dinner at 7"})
+    assert "HH:MM-HH:MM category" in await dash.flash("/memory/places")
 
 
 # --- users & telegram ------------------------------------------------------------------------

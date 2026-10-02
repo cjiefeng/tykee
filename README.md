@@ -164,7 +164,7 @@ loop, and update `docs/design.md` in the same commit as any behaviour change.
 | M5 ✅ | Bootstrap import from 6 months of Telegram chat history |
 | M6 ✅ | Scheduled nudges, backups, healthcheck, runbook |
 | M7 ✅ | Web search and fetch, with cited answers |
-| M8 🚧 | Google Maps links → places: resolve pasted links to a named shop (no API, no LLM), record "eating here" as a decision, never store home addresses |
+| M8 ✅ | Google Maps links → places: resolve pasted links to a named shop (no API, no LLM), record "eating here" as a decision, never store home addresses |
 | M9 | Place recommendations: "brunch around Tiong Bahru, pet friendly" picks from known places plus web discovery, with must-have filters and a source for each attribute (you confirmed vs. per website) |
 
 Details and acceptance criteria are in design §16.

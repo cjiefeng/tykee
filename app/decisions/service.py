@@ -31,6 +31,20 @@ class OptionInfo:
 
 
 @dataclass(frozen=True)
+class TodayDecision:
+    category: str
+    choice: str
+    status: str
+    maps_url: str | None = None  # when the choice is a known place (§10.5)
+
+
+@dataclass(frozen=True)
+class Recorded:
+    decision_id: int
+    created: bool  # False: the same choice was already recorded this session
+
+
+@dataclass(frozen=True)
 class RecentDecision:
     created_at: datetime
     choice_text: str
@@ -149,16 +163,33 @@ class DecisionService:
         ]
 
     async def add_option(
-        self, category: Category, name: str, tags: Sequence[str], owner: str
+        self,
+        category: Category,
+        name: str,
+        tags: Sequence[str],
+        owner: str,
+        place_id: int | None = None,
     ) -> bool:
         """Returns False if an option with that name already exists in the category."""
 
         def _add(conn: sqlite3.Connection) -> bool:
             cur = conn.execute(
-                "INSERT OR IGNORE INTO options(category_id, name, tags_json, owner, created_by) "
-                "VALUES (?, ?, ?, ?, 'bot')",
-                (category.id, name.strip(), json.dumps(list(tags), ensure_ascii=False), owner),
+                "INSERT OR IGNORE INTO options(category_id, name, tags_json, owner, created_by, "
+                "place_id) VALUES (?, ?, ?, ?, 'bot', ?)",
+                (
+                    category.id,
+                    name.strip(),
+                    json.dumps(list(tags), ensure_ascii=False),
+                    owner,
+                    place_id,
+                ),
             )
+            if not cur.rowcount and place_id is not None:
+                conn.execute(
+                    "UPDATE options SET place_id = ? WHERE category_id = ? AND name = ? "
+                    "AND place_id IS NULL",
+                    (place_id, category.id, name.strip()),
+                )
             return cur.rowcount > 0
 
         return await self._db.write(_add)
@@ -203,18 +234,19 @@ class DecisionService:
         )
         return [(r["id"], r["choice_text"]) for r in rows]
 
-    async def today(self, chat_id: int, tz: ZoneInfo) -> list[tuple[str, str, str]]:
-        """(category, choice, status) for decisions made in this chat since local midnight."""
+    async def today(self, chat_id: int, tz: ZoneInfo) -> list[TodayDecision]:
+        """Decisions made in this chat since local midnight, with the Maps link for places."""
         since = to_sql(local_day_start(self._clock(), tz))
         rows = await self._db.read(
             lambda c: c.execute(
-                "SELECT c.display_name, d.choice_text, d.status FROM decisions d "
+                "SELECT c.display_name, d.choice_text, d.status, p.maps_url FROM decisions d "
                 "JOIN categories c ON c.id = d.category_id "
+                "LEFT JOIN places p ON p.id = d.place_id "
                 "WHERE d.chat_id IS ? AND d.created_at >= ? ORDER BY d.id",
                 (chat_id, since),
             ).fetchall()
         )
-        return [(r[0], r[1], r[2]) for r in rows]
+        return [TodayDecision(r[0], r[1], r[2], r[3]) for r in rows]
 
     async def describe(self, decision_id: int) -> tuple[str, str, str] | None:
         """(category display name, choice, for_users) for the decision log mirror."""
@@ -238,30 +270,117 @@ class DecisionService:
         for_users: str,
         at: datetime,
         chat_id: int | None,
+        place_id: int | None = None,
     ) -> int:
         """A choice seen in another topic (§10.4): stored as accepted so it feeds recency, with
-        ``source='observed'``. Matches an existing option by name when there is one."""
+        ``source='observed'``. Matches an existing option by name when there is one; a known
+        place (§10.5) also becomes an option of the category."""
         asked_by = next(iter(self._users_by_slug.values()))
 
         def _ins(c: sqlite3.Connection) -> int:
-            row = c.execute(
-                "SELECT id FROM options WHERE category_id = ? AND lower(name) = lower(?)",
-                (category.id, choice),
-            ).fetchone()
+            option_id = (
+                _place_option(c, category.id, choice, place_id)
+                if place_id is not None
+                else _option_by_name(c, category.id, choice)
+            )
             cur = c.execute(
                 "INSERT INTO decisions(category_id, option_id, choice_text, for_users, asked_by, "
-                "status, source, chat_id, created_at) VALUES (?, ?, ?, ?, ?, 'accepted', "
-                "'observed', ?, ?)",
+                "status, source, chat_id, created_at, place_id) VALUES (?, ?, ?, ?, ?, "
+                "'accepted', 'observed', ?, ?, ?)",
                 (
                     category.id,
-                    row[0] if row else None,
+                    option_id,
                     choice,
                     for_users,
                     asked_by,
                     chat_id,
                     to_sql(at),
+                    place_id,
                 ),
             )
             return int(cur.lastrowid or 0)
 
         return await self._db.write(_ins)
+
+    async def record_user(
+        self,
+        category: Category,
+        *,
+        choice: str,
+        for_users: str,
+        asked_by: int,
+        chat_id: int | None,
+        place_id: int | None = None,
+    ) -> Recorded:
+        """A choice the users made themselves (§7.3 ``record_decision``, §10.5 shared place +
+        "eating here"): accepted, ``source='user'``, so recency and history stay right. The
+        same choice again within the session window isn't recorded twice."""
+        s = await self._settings.load()
+        now = self._clock()
+        since = to_sql(now - timedelta(hours=s.decisions_session_hours))
+        choice = choice.strip()
+
+        def _ins(c: sqlite3.Connection) -> Recorded:
+            dup = c.execute(
+                "SELECT id FROM decisions WHERE category_id = ? AND chat_id IS ? "
+                "AND status = 'accepted' AND created_at >= ? "
+                "AND (lower(choice_text) = lower(?) OR (place_id IS NOT NULL AND place_id IS ?)) "
+                "ORDER BY id DESC LIMIT 1",
+                (category.id, chat_id, since, choice, place_id),
+            ).fetchone()
+            if dup is not None:
+                return Recorded(int(dup[0]), created=False)
+            option_id = (
+                _place_option(c, category.id, choice, place_id)
+                if place_id is not None
+                else _option_by_name(c, category.id, choice)
+            )
+            cur = c.execute(
+                "INSERT INTO decisions(category_id, option_id, choice_text, for_users, asked_by, "
+                "status, source, chat_id, created_at, place_id) VALUES (?, ?, ?, ?, ?, "
+                "'accepted', 'user', ?, ?, ?)",
+                (
+                    category.id,
+                    option_id,
+                    choice,
+                    for_users,
+                    asked_by,
+                    chat_id,
+                    to_sql(now),
+                    place_id,
+                ),
+            )
+            return Recorded(int(cur.lastrowid or 0), created=True)
+
+        return await self._db.write(_ins)
+
+
+def _option_by_name(c: sqlite3.Connection, category_id: int, name: str) -> int | None:
+    row = c.execute(
+        "SELECT id FROM options WHERE category_id = ? AND lower(name) = lower(?)",
+        (category_id, name),
+    ).fetchone()
+    return int(row[0]) if row else None
+
+
+def _place_option(c: sqlite3.Connection, category_id: int, name: str, place_id: int) -> int:
+    """The category's option for a place (§10.5): by place, else by name (linking it), else a
+    new option tagged ``place``."""
+    row = c.execute(
+        "SELECT id FROM options WHERE category_id = ? AND place_id = ?", (category_id, place_id)
+    ).fetchone()
+    if row is not None:
+        return int(row[0])
+    by_name = _option_by_name(c, category_id, name)
+    if by_name is not None:
+        c.execute(
+            "UPDATE options SET place_id = COALESCE(place_id, ?) WHERE id = ?",
+            (place_id, by_name),
+        )
+        return by_name
+    cur = c.execute(
+        "INSERT INTO options(category_id, name, tags_json, created_by, place_id) "
+        "VALUES (?, ?, ?, 'bot', ?)",
+        (category_id, name, json.dumps(["place"]), place_id),
+    )
+    return int(cur.lastrowid or 0)
