@@ -15,6 +15,17 @@
   <div class="card"><h3>Spend this month</h3>
     <div class="big {{ 'bad' if budget.monthly_spent >= budget.monthly_cap else ('warn' if budget.monthly_spent >= warn * budget.monthly_cap else '') }}">{{ spend.month | usd }}</div>
     <div class="muted small">of {{ budget.monthly_cap | usd }}</div>{{ meter(budget.monthly_spent, budget.monthly_cap) }}</div>
+  <div class="card"><h3>Web searches today</h3>
+    {%- set cap = s.web_daily_search_cap %}
+    <div class="big {{ 'bad' if spend.searches_today >= cap else ('warn' if spend.searches_today >= warn * cap else '') }}">{{ spend.searches_today }}</div>
+    <div class="muted small">of {{ cap }} (<code>web.daily_search_cap</code>)</div>{{ meter(spend.searches_today, cap) }}
+    <div class="small">
+    {%- if web_status.on %}<span class="dot ok">web on</span>
+    {%- elif web_status.reason == 'daily_cap' %}<span class="dot bad">paused: daily search cap reached, back after midnight</span>
+    {%- elif web_status.reason == 'budget' %}<span class="dot warn">paused: spend is past {{ (warn * 100) | round(0) | int }}% of a budget cap</span>
+    {%- elif web_status.reason == 'rejected' %}<span class="dot bad">rejected by the API: {{ web_status.detail }}</span>
+    {%- else %}<span class="dot warn">off</span>{% endif %}
+    · <a href="/behaviour#web">Web settings</a></div></div>
   <div class="card"><h3>Messages today</h3><div class="big">{{ counts.messages_today }}</div>
     <div class="muted small">{{ counts.inbox_pending }} {{ 'memory' if counts.inbox_pending == 1 else 'memories' }} waiting in the <a href="/memory/inbox">inbox</a></div></div>
 </div>

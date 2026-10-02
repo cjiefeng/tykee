@@ -8,6 +8,7 @@ from fastapi.responses import HTMLResponse, Response
 from app.dashboard import queries, views_ops
 from app.dashboard.core import DashboardDeps, back, render
 from app.llm.client import budget_status
+from app.orchestrator.web import web_status
 from app.telegram.topics import send_thread
 from app.timeutil import utcnow
 
@@ -42,6 +43,7 @@ def register(router: APIRouter, deps: DashboardDeps) -> None:
             db_bytes=queries.db_size(deps.db_path),
             embed_model=deps.embed_model,
             warn=s.budget_warn_ratio,
+            web_status=await web_status(deps.db, s, deps.tz, deps.health),
             backup_enabled=s.backup_enabled,
             **views_ops.backup_context(deps),
         )

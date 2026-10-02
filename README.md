@@ -37,7 +37,9 @@ It runs as one Python 3.12 asyncio process with SQLite, in a single Docker conta
   they never depend on search recall.
 - **Web lookups** happen only when the answer depends on live facts, capped per reply and per day,
   and paused when spend nears the budget. Facts found on the web never go into memory without
-  approval.
+  approval. The dashboard Overview shows today's searches against the daily cap and why web is
+  paused (search cap, budget, or the API rejecting web search, e.g. it's off for your org in the
+  Claude Console).
 - **Bootstrap import:** upload a Telegram Desktop export in the dashboard and Tykee learns your
   past decisions, categories and preferences from it. Health, money, work and relationship talk
   is skipped.
