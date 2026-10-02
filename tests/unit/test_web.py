@@ -4,6 +4,7 @@ safety, pause_turn, usage/cost. All offline: web results are scripted with ``web
 from __future__ import annotations
 
 import json
+from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
@@ -14,9 +15,10 @@ from app.dashboard import queries
 from app.db.repos import usage as usage_repo
 from app.llm.client import LLMBadRequest
 from app.orchestrator.prompt import WEB_RULES
+from app.orchestrator.web import web_status
 from app.settings import seed_values, set_value
 from app.timeutil import to_sql, utcnow
-from tests.conftest import JACK_TG, Env, Stack, make_stack, mention, tg_message
+from tests.conftest import JACK_TG, TZ, Env, Stack, make_stack, mention, tg_message
 from tests.fakes.fake_llm import FakeLLMClient, tool_call, web_turn
 from tests.unit.test_llm_client import Script, _client, _ok_body, _req
 
@@ -227,12 +229,34 @@ async def test_settings_validation(env: Env) -> None:
 
 
 async def test_rejected_web_request_retries_without_web(env: Env) -> None:
-    llm = FakeLLMClient(LLMBadRequest("BadRequestError"), "Probably fine, can't check now.")
+    detail = "web search is not enabled for this organization"
+    llm = FakeLLMClient(
+        LLMBadRequest("BadRequestError", detail), "Probably fine, can't check now.", "Sure."
+    )
     stack = make_stack(env, llm)
     await _ask(stack, env, RAMEN)
     assert "web_search" in _names(llm.requests[0].tools)
     assert "web_search" not in _names(llm.requests[1].tools)
     assert stack.gateway.sent[-1].text == "Probably fine, can't check now."
+    # Remembered: the next turn skips the web tools instead of paying for another rejection,
+    # and the reason is there for the dashboard.
+    assert stack.health.web_rejected == detail
+    status = await web_status(env.db, await env.settings.load(), TZ, stack.health)
+    assert (status.on, status.reason, status.detail) == (False, "rejected", detail)
+    await _ask(stack, env, RAMEN)
+    assert len(llm.requests) == 3
+    assert "web_search" not in _names(llm.requests[2].tools)
+
+
+async def test_rejection_cooldown_expires(env: Env) -> None:
+    llm = FakeLLMClient("Open till 10.")
+    stack = make_stack(env, llm)
+    stack.health.web_rejected_by_api("nope")
+    assert stack.health.web_rejected_at is not None
+    stack.health.web_rejected_at -= timedelta(hours=2)
+    await _ask(stack, env, RAMEN)
+    assert "web_search" in _names(llm.requests[0].tools)
+    assert stack.health.web_rejected is None
 
 
 def test_web_tools_only_on_the_orchestrator() -> None:

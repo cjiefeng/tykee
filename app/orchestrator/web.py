@@ -10,6 +10,7 @@ from __future__ import annotations
 import sqlite3
 from collections.abc import Sequence
 from dataclasses import dataclass
+from datetime import timedelta
 from typing import Any, Literal, cast
 from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo
@@ -18,32 +19,47 @@ from anthropic.types import ContentBlock, Message, ToolUnionParam
 
 from app.db.database import Database
 from app.db.repos import usage as usage_repo
+from app.health import HealthState
 from app.llm.client import budget_status
 from app.settings import RuntimeSettings
 from app.timeutil import local_day_start, to_sql, utcnow
 
 WEB_TOOL_NAMES = frozenset({"web_search", "web_fetch"})
 MAX_SOURCES = 2
+# After the API rejects a request carrying web tools (e.g. web search off for the org in the
+# Console), skip them for a while instead of paying for a rejected call on every turn.
+REJECTED_COOLDOWN = timedelta(hours=1)
 
-WebOff = Literal["", "disabled", "daily_cap", "budget"]
+WebOff = Literal["", "disabled", "daily_cap", "budget", "rejected"]
 
 
 @dataclass(frozen=True)
 class WebStatus:
     on: bool
     reason: WebOff = ""  # why it's off; "" when on
+    detail: str = ""  # the API's error message when reason == "rejected"
 
     @property
     def temporarily_off(self) -> bool:
         """Off for a reason Claude should mention if live info is needed (not the master switch)."""
-        return self.reason in ("daily_cap", "budget")
+        return self.reason in ("daily_cap", "budget", "rejected")
 
 
-async def web_status(db: Database, s: RuntimeSettings, tz: ZoneInfo) -> WebStatus:
-    """§7.5: the master switch, then the daily search cap, then the budget. Web tools are the
-    first thing dropped when spend reaches ``budget.warn_ratio`` of either cap."""
+async def web_status(
+    db: Database, s: RuntimeSettings, tz: ZoneInfo, health: HealthState | None = None
+) -> WebStatus:
+    """§7.5: the master switch, a recent API rejection, then the daily search cap, then the
+    budget. Web tools are the first thing dropped when spend reaches ``budget.warn_ratio`` of
+    either cap."""
     if not s.web_enabled or s.web_tool_versions is None:
         return WebStatus(False, "disabled")
+    rejected_at = health.web_rejected_at if health is not None else None
+    if (
+        health is not None
+        and rejected_at is not None
+        and utcnow() - rejected_at < REJECTED_COOLDOWN
+    ):
+        return WebStatus(False, "rejected", health.web_rejected or "")
     day = to_sql(local_day_start(utcnow(), tz))
 
     def _searches(conn: sqlite3.Connection) -> int:

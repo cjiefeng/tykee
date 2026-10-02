@@ -36,6 +36,9 @@
   {% if web_status.on %}<strong>On.</strong>
   {% elif web_status.reason == 'daily_cap' %}<strong>Paused:</strong> daily search cap reached; back after midnight.
   {% elif web_status.reason == 'budget' %}<strong>Paused:</strong> spend is past the budget warn ratio.
+  {% elif web_status.reason == 'rejected' %}<strong>Rejected by the API:</strong> {{ web_status.detail }}
+  Check that web search (and fetch) are allowed for the organization in the Claude Console;
+  retried automatically within the hour.
   {% else %}<strong>Off.</strong>{% endif %}
   {{ searches_today }} of {{ s.web_daily_search_cap }} searches used today.</p>
 <form method="post" action="/behaviour/web" class="form-panel">{{ csrf_input }}

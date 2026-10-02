@@ -25,6 +25,7 @@ from app.db.repos import summaries as summaries_repo
 from app.db.repos.users import UserRecord
 from app.decisions.engine import PickRequest
 from app.decisions.service import DecisionService
+from app.health import HealthState
 from app.llm.client import (
     BudgetExceeded,
     LLMBadRequest,
@@ -114,9 +115,11 @@ class Orchestrator:
         memory: MemoryService | None = None,
         places: PlaceService | None = None,
         recommend: RecommendService | None = None,
+        health: HealthState | None = None,
         clock: Callable[[], datetime] = utcnow,
     ) -> None:
         self._summarizer = summarizer
+        self._health = health
         self._memory = memory
         self._db = db
         self._settings = settings
@@ -172,7 +175,7 @@ class Orchestrator:
         pinned = await self._memory.pinned_block() if self._memory is not None else None
         pets = await self._memory.pets() if self._memory is not None else []
         today = await self._decisions.today(chat.chat_id, self._tz)
-        web = await web_status(self._db, s, self._tz)
+        web = await web_status(self._db, s, self._tz, self._health)
         if not web.on and web.reason != "disabled":
             log.info("web tools off", extra={"reason": web.reason})
 
@@ -200,13 +203,21 @@ class Orchestrator:
                 extra = web_tools(s) if web.on else []
                 ctx.web_on = bool(extra)
                 resp = await self._loop(system_for(bool(extra)), messages, ctx, [*tools, *extra])
-            except LLMBadRequest:
+                if extra and self._health is not None:
+                    self._health.web_ok()
+            except LLMBadRequest as e:
                 if not web.on or ctx.web_used:
                     raise
                 # e.g. web search disabled for the org in the Console: answer without the web.
-                log.warning("request with web tools rejected; retrying without them")
+                log.warning(
+                    "request with web tools rejected; retrying without them",
+                    extra={"detail": e.detail or None},
+                )
                 ctx.web_on = False
                 resp = await self._loop(system_for(False), messages, ctx, tools)
+                # The same turn went through without them, so the web tools were the problem.
+                if self._health is not None:
+                    self._health.web_rejected_by_api(e.detail)
         except BudgetExceeded as e:
             log.warning("budget exhausted", extra={"period": e.period})
             reply = await self._fallback(FALLBACK_BUDGET, chat, actor, text, ctx)

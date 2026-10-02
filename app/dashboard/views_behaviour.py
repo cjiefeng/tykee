@@ -96,7 +96,7 @@ def register(router: APIRouter, deps: DashboardDeps) -> None:
             raw=await _raw_map(deps),
             web_numbers=WEB_NUMBERS,
             recommend_numbers=RECOMMEND_NUMBERS,
-            web_status=await web_status(deps.db, s, deps.tz),
+            web_status=await web_status(deps.db, s, deps.tz, deps.health),
             searches_today=await queries.web_searches_today(deps.db, utcnow(), deps.tz),
         )
 

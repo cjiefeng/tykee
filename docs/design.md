@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **Status** | Draft v1.32 (share.google links resolve to places; `not_place` link status, §10.5) |
+| **Status** | Draft v1.33 (a 400 on web tools pauses them for an hour and shows the API's reason on the dashboard, §7.5) |
 | **Name** | Tykee: phonetic spelling of Tyche, the Greek goddess of chance. Telegram handle e.g. `@TykeeBot` (must end in "bot") |
 | **Author** | Jack |
 | **Date** | 2026-10-01 |
@@ -628,7 +628,7 @@ Tykee can look things up online using the Claude API's built-in **web search** a
 **Implementation notes (M7):**
 - `app/orchestrator/web.py` holds the gate (`web_status`), the tool definitions built from settings (`web_tools`), and readers for the result blocks. A test fails if anything outside the orchestrator builds web tools.
 - **Gate, checked once per turn:** `web.enabled` (and `web.tool_versions` set) → today's searches (`SUM(usage.web_search_requests)` since local midnight) < `web.daily_search_cap` → daily and monthly spend both below `budget.warn_ratio` × cap. When the cap or budget closes the gate, the dynamic context tells Claude lookups are paused so it says it can't check live info. The web rules are appended to the cached rules block only when the tools are offered.
-- **Org-level disable:** a 400 on a request that carried web tools (e.g. web search turned off in the Console) is retried once without them instead of falling back to "offline" (`LLMBadRequest`).
+- **Org-level disable:** a 400 on a request that carried web tools (e.g. web search turned off in the Console) is retried once without them instead of falling back to "offline" (`LLMBadRequest`). If that retry succeeds, the web tools were the problem (v1.33): the API's error message is kept in the health state, web tools are skipped for an hour (no paying for a rejected call on every turn; Claude gets the "paused" line), and the Behaviour page's Web section shows "Rejected by the API: <message>" so a Console setting doesn't silently turn into "I can't search the web".
 - **Memory safety, enforced in code, not just the persona:** once a web search/fetch has run in a turn, `write_note` returns an error pointing to `propose_memory`, and every `propose_memory` in that turn goes to the inbox even with `memory.auto_approve`. `propose_memory` also takes an optional `source_url`; when given, the inbox source is `web:<url>` and review is forced in any turn.
 - **Echoing turns:** server tool blocks (`server_tool_use`, `web_search_tool_result`, `web_fetch_tool_result`) are sent back verbatim, since search results carry `encrypted_content` the API needs. `pause_turn` is resumed by re-sending the paused assistant turn (counts toward the 6-iteration limit). As with client tools, web results are not replayed in later turns' history.
 - **Sources:** if the final text has no link, up to two cited search results are appended as `[site](url)`, which the formatter turns into `<a>` links.
