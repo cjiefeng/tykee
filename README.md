@@ -11,7 +11,7 @@ chance.
   both people's preferences, dislikes and allergies.
 - **A LAN-only admin dashboard** controls persona, models, options, memory and spend.
 
-It runs as one Python 3.12 asyncio process with SQLite, in a single Docker container on a home NAS
+It runs as one Python 3.12 asyncio process with SQLite, in a single Docker container on a home server
 (linux/amd64, ≤ 1 GB RAM). The design doc is the source of truth:
 **[docs/design.md](docs/design.md)**.
 
@@ -81,14 +81,14 @@ cp .env.example .env
 | `ALLOWED_TELEGRAM_IDS` | `<id>:<slug>` pairs, comma-separated. The first entry is the admin. |
 | `GROUP_CHAT_ID` | The one group Tykee serves. Can be left empty at first (see step 4). |
 | `TZ` | Household timezone. Daily budgets and caps reset on its day boundaries. |
-| `TYKEE_DATA_DIR` | Host path mounted at `/data` (default `./data`). On the NAS, use the NVMe volume. |
+| `TYKEE_DATA_DIR` | Host path mounted at `/data` (default `./data`). On the server, use a fast persistent volume. |
 | `DASHBOARD_PASSWORD_HASH`, `SESSION_SECRET` | Dashboard login (M4). Single-quote the argon2 hash, because compose interpolates `$`. |
 
 Never commit `.env` or the data directory.
 
 ### 3. Run
 
-On the NAS:
+On the server:
 
 ```bash
 ./deploy.sh
@@ -149,5 +149,5 @@ Details and acceptance criteria are in design §16.
 
 ## Privacy
 
-Everything stays on the NAS except the prompts sent to the Anthropic API. Embeddings are computed
+Everything stays on the server except the prompts sent to the Anthropic API. Embeddings are computed
 locally. The dashboard is LAN-only, with no port forwarding.
