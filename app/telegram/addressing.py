@@ -103,6 +103,10 @@ def stored_text(msg: Message, kind: Kind) -> str:
         "voice": "[voice]",
         "other": "[media]",
     }
+    if msg.venue is not None:
+        return f"[venue] {msg.venue.title}"  # address and pin added by PlaceService (§10.5)
+    if msg.location is not None:
+        return "[location]"  # coordinates are never stored
     if kind in placeholder:
         tag = placeholder[kind]
         if kind == "sticker" and msg.sticker is not None and msg.sticker.emoji:

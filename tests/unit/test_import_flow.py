@@ -184,7 +184,7 @@ async def test_full_import_reviewed_and_applied(rig: Rig) -> None:
     for kind in ("category", "option", "decision", "note"):
         await rig.svc.edit(lambda c, k=kind: jobs.bulk_approve(c, job_id, k, 0.8))
     summary = await rig.svc.apply(job_id, delete_export=True)
-    assert summary == {"categories": 1, "options": 2, "decisions": 4, "notes": 1}
+    assert summary == {"categories": 1, "options": 2, "decisions": 4, "notes": 1, "places": 0}
 
     cat = await rig.stack.decisions.lookup("makan where")
     assert cat is not None and cat.slug == "dinner"

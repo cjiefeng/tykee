@@ -10,6 +10,7 @@ from zoneinfo import ZoneInfo
 from anthropic.types import TextBlockParam
 
 from app.db.repos.users import UserRecord
+from app.decisions.service import TodayDecision
 
 RULES = """\
 Output format (Telegram):
@@ -52,7 +53,20 @@ replace_section instead of adding a conflicting line.
 ("contains:<ingredient>") so they're enforced on every pick.
 - If a durable fact comes up in passing (not asked to remember), use propose_memory; it waits \
 for approval, so don't claim it's remembered.
-- Never change pinned notes unless explicitly asked."""
+- Never change pinned notes unless explicitly asked.
+
+Places (Google Maps links):
+- A shared Maps link or venue is followed by a marker like ⟦place: Name · address · lat,lng · \
+place_id=N⟧. "⟦location shared⟧" is an unnamed location or a home: never ask about it, guess it \
+or repeat it.
+- When someone says they're going to a shared place ("eating here", "let's go this one"), call \
+resolve_category for the kind of outing (dinner, lunch, cafe… by time of day and context), then \
+record_decision with its place_id. A reaction confirms it; reply with a few words at most.
+- If someone shares a place without deciding, you can add_option it (with place_id) when they \
+clearly like it.
+- If asked where you're going or eating, answer from "Decisions today" and link the place as \
+[name](maps link).
+- Never write markers yourself; refer to places by name."""
 
 WEB_RULES = """
 Web (web_search, web_fetch):
@@ -93,6 +107,7 @@ def dynamic_context(
     default_for_users: str,
     unprompted_reason: str | None = None,
     web_paused: bool = False,
+    today: Sequence[TodayDecision] = (),
 ) -> str:
     local = now.astimezone(ZoneInfo(actor.timezone))
     lines = [
@@ -111,6 +126,11 @@ def dynamic_context(
             '"we", "us", "both" or "together", decisions are for them only.'
         )
     lines.append(f"Default for_users: {default_for_users}")
+    if today:
+        lines.append("Decisions today (this chat):")
+        for d in today:
+            link = f", maps link: {d.maps_url}" if d.maps_url else ""
+            lines.append(f"- {d.category}: {d.choice} ({d.status}{link})")
     if web_paused:
         lines.append(
             "Live web lookups are paused right now (daily limit or budget). If the answer needs "

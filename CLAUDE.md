@@ -67,9 +67,17 @@ All tooling runs inside Docker (no local Python/uv needed).
   episode dedupe, category-design validation, options/weights, notes), `jobs.py` (queries +
   review edits), `service.py` (`ImportService`: job state machine ticked by the scheduler, one
   Message Batch per round, Opus consolidation, apply). Exports live in `/data/imports`.
+- `app/places/`: Google Maps links → places (§10.5). `links.py` (pure: detection, host
+  allowlist, URL parser, named-business privacy rule, `⟦place: …⟧` markers), `resolver.py`
+  (`PlaceResolver`, the only code that fetches Maps links: short links only, hop by hop, cached in
+  `place_links`), `service.py` (`PlaceService`: annotate before storing, upsert/dedupe, place
+  notes whose `## Details` bullets it owns, visits, rename/merge/delete, hourly retry, import
+  adoption), `intent.py` + `decide.py` (`SharedPlaces`: code-only "eating here" in the answer
+  topic, reactions for Claude's `record_decision`).
 - `app/dashboard/`: FastAPI + Jinja2 + vendored HTMX (§11), served by uvicorn inside the bot's
   event loop. `core.py` (LAN-only, argon2 login + lockout, sessions, CSRF, `render()`),
-  `queries.py` (all dashboard SQL + validated `save_settings`), `views_*.py` per page,
+  `queries.py` (all dashboard SQL + validated `save_settings`), `views_*.py` per page (Places:
+  `views_places.py` under `/memory/places`),
   `templates/`, `static/` (see `static/VENDORED.md`). `python -m app.dashboard.hashpw` makes the
   password hash + session secret.
 - `app/health.py`: in-process health signals for the dashboard tiles, the event-loop `heartbeat`
@@ -85,6 +93,8 @@ All tooling runs inside Docker (no local Python/uv needed).
   `service.py` (`AmbientService` ties it together; the adapter is its `responder`).
 - `scripts/embedding_eval.py`: the §6.9 int8 vs fp32 eval (needs the real models; run in the dev
   container with `uv run python -m scripts.embedding_eval all <cache dir>`).
+- Place tests: `make_stack(env, redirects={short: target})` wires an `httpx.MockTransport` into the
+  resolver (anything else is a 404); `url_entities(text, *urls)` builds Telegram `url` entities.
 - `tests/fakes/`: `FakeLLMClient` (scripted text / `tool_call(...)` / exceptions), `FakeGateway`,
   `FakeEmbedder` (hashed bag of words; unit tests never load the real model), `FakeBatches`
   (scripted Message Batches), `telegram_export.py` (export builders).

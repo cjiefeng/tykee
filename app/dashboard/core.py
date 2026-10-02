@@ -38,6 +38,7 @@ from app.harvest import Harvester
 from app.health import HealthState
 from app.importer.service import ImportService
 from app.nudges import NudgeService
+from app.places.service import PlaceService
 from app.settings import SettingsStore
 from app.telegram.gateway import ChatGateway
 from app.telegram.topics import TopicService
@@ -87,6 +88,7 @@ class DashboardDeps:
     importer: ImportService | None = None
     nudges: NudgeService | None = None
     backups: BackupService | None = None
+    places: PlaceService | None = None
     embed_model: str = ""
     _failures: dict[str, tuple[int, float]] = field(default_factory=dict)
 

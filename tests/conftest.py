@@ -9,6 +9,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+import httpx
 import pytest
 from aiogram.types import Chat, Message, MessageEntity, User
 
@@ -25,6 +26,9 @@ from app.decisions.service import DecisionService
 from app.health import HealthState
 from app.orchestrator.orchestrator import Orchestrator
 from app.orchestrator.summary import Summarizer
+from app.places.decide import SharedPlaces
+from app.places.resolver import PlaceResolver
+from app.places.service import PlaceService
 from app.settings import SettingsStore, seed_settings
 from app.telegram.adapter import TelegramAdapter
 from app.telegram.addressing import BotIdentity
@@ -122,6 +126,33 @@ def mention(text: str, handle: str = "@TykeeBot") -> tuple[str, list[MessageEnti
     return full, [MessageEntity(type="mention", offset=0, length=len(handle))]
 
 
+def _u16(text: str) -> int:
+    return len(text.encode("utf-16-le")) // 2
+
+
+def url_entities(text: str, *urls: str) -> list[MessageEntity]:
+    """``url`` entities for each URL in ``text`` (offsets in UTF-16 units, like Telegram)."""
+    return [
+        MessageEntity(type="url", offset=_u16(text[: text.index(u)]), length=_u16(u)) for u in urls
+    ]
+
+
+# Short link → where Google redirects it (tests/unit/test_place_*.py). Anything else is a 404.
+MAPS_REDIRECTS: dict[str, str] = {}
+
+
+def maps_transport(redirects: dict[str, str] | None = None) -> httpx.MockTransport:
+    table = MAPS_REDIRECTS if redirects is None else redirects
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        target = table.get(str(request.url))
+        if target is None:
+            return httpx.Response(404)
+        return httpx.Response(302, headers={"location": target})
+
+    return httpx.MockTransport(handler)
+
+
 @dataclass
 class Clock:
     now: datetime = NOW
@@ -148,9 +179,16 @@ class Stack:
     embedder: FakeEmbedder
     topics: TopicService
     health: HealthState
+    places: PlaceService
+    shared: SharedPlaces
 
 
-def make_stack(env: Env, llm: FakeLLMClient | None = None, seed: int = 7) -> Stack:
+def make_stack(
+    env: Env,
+    llm: FakeLLMClient | None = None,
+    seed: int = 7,
+    redirects: dict[str, str] | None = None,
+) -> Stack:
     clock = Clock()
     llm = llm or FakeLLMClient()
     gw = FakeGateway()
@@ -174,6 +212,22 @@ def make_stack(env: Env, llm: FakeLLMClient | None = None, seed: int = 7) -> Sta
     )
     topics = TopicService(db=env.db, settings=env.settings, group_id=lambda: GROUP_ID, clock=clock)
     health = HealthState()
+    resolver = PlaceResolver(
+        env.db, client=httpx.AsyncClient(transport=maps_transport(redirects)), clock=clock
+    )
+    places = PlaceService(
+        db=env.db, settings=env.settings, resolver=resolver, tz=TZ, store=store, clock=clock
+    )
+    shared = SharedPlaces(
+        db=env.db,
+        settings=env.settings,
+        places=places,
+        decisions=decisions,
+        react=gw.set_reaction,
+        tz=TZ,
+        memory=memory,
+        clock=clock,
+    )
     summarizer = Summarizer(
         db=env.db,
         settings=env.settings,
@@ -191,6 +245,7 @@ def make_stack(env: Env, llm: FakeLLMClient | None = None, seed: int = 7) -> Sta
         tz=TZ,
         summarizer=summarizer,
         memory=memory,
+        places=places,
         clock=clock,
     )
     ambient = AmbientService(
@@ -217,8 +272,9 @@ def make_stack(env: Env, llm: FakeLLMClient | None = None, seed: int = 7) -> Sta
         memory=memory,
         topics=topics,
         health=health,
+        places=shared,
     )
-    env.closers += [ambient.close, summarizer.close]
+    env.closers += [ambient.close, summarizer.close, resolver.close]
     return Stack(
         adapter,
         gw,
@@ -233,6 +289,8 @@ def make_stack(env: Env, llm: FakeLLMClient | None = None, seed: int = 7) -> Sta
         embedder,
         topics,
         health,
+        places,
+        shared,
     )
 
 

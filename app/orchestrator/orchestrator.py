@@ -45,6 +45,7 @@ from app.orchestrator.web import (
     web_tools,
     with_sources,
 )
+from app.places.service import PlaceService
 from app.settings import SettingsStore
 from app.timeutil import utcnow
 
@@ -72,6 +73,7 @@ class Reply:
     from_llm: bool  # False for fallback text, which is not stored in history
     picks: list[tuple[int, str]] = field(default_factory=list)  # (decision_id, name) → buttons
     budget_exhausted: bool = False  # §14.4: the adapter DMs the admin once a day
+    recorded: list[tuple[int, int | None]] = field(default_factory=list)  # → reaction (§10.5)
 
 
 def assistant_blocks(content: Sequence[ContentBlock]) -> list[ContentBlockParam]:
@@ -108,6 +110,7 @@ class Orchestrator:
         tz: ZoneInfo,
         summarizer: Summarizer | None = None,
         memory: MemoryService | None = None,
+        places: PlaceService | None = None,
         clock: Callable[[], datetime] = utcnow,
     ) -> None:
         self._summarizer = summarizer
@@ -116,7 +119,7 @@ class Orchestrator:
         self._settings = settings
         self._llm = llm
         self._decisions = decisions
-        self._tools = ToolRouter(decisions, memory)
+        self._tools = ToolRouter(decisions, memory, places)
         self._users = list(users)
         self._users_by_id = {u.id: u for u in users}
         self._tz = tz
@@ -164,6 +167,7 @@ class Orchestrator:
             source=f"telegram:{chat.chat_id}",
         )
         pinned = await self._memory.pinned_block() if self._memory is not None else None
+        today = await self._decisions.today(chat.chat_id, self._tz)
         web = await web_status(self._db, s, self._tz)
         if not web.on and web.reason != "disabled":
             log.info("web tools off", extra={"reason": web.reason})
@@ -179,6 +183,7 @@ class Orchestrator:
                     default_for_users=ctx.default_for_users,
                     unprompted_reason=unprompted_reason,
                     web_paused=web.temporarily_off,
+                    today=today,
                 ),
                 pinned=pinned,
                 web=web_on,
@@ -210,9 +215,12 @@ class Orchestrator:
         if not out:
             if ctx.last_picks:
                 out = f"🎲 {bold_list([n for _, n in ctx.last_picks])}"
+            elif ctx.recorded:
+                # The reaction is the answer (§10.5); nothing to send.
+                return Reply("", from_llm=True, recorded=ctx.recorded)
             else:
                 return Reply(FALLBACK_EMPTY, from_llm=False)
-        return Reply(out, from_llm=True, picks=ctx.last_picks)
+        return Reply(out, from_llm=True, picks=ctx.last_picks, recorded=ctx.recorded)
 
     async def _loop(
         self,

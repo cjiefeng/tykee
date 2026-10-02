@@ -6,6 +6,7 @@
   {% if pending %}<a class="button primary" href="/memory/inbox">Review inbox ({{ pending | length }})</a>
   {% else %}<span class="muted small">Inbox empty. <a href="/memory/inbox?status=approved">History</a></span>{% endif %}
 </div>
+<p class="small"><a href="/memory/places">Places</a> from shared Google Maps links.</p>
 <form method="get" action="/memory" class="actions" role="search"><label for="q" class="sr-only">Search memory</label>
   <input id="q" type="text" name="q" value="{{ q }}" placeholder="Search memory (same hybrid search Tykee uses)"><button>Search</button></form>
 {% if q %}

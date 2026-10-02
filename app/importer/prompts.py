@@ -40,6 +40,9 @@ and one-offs.
 - options: specific named options mentioned for a kind of decision (a restaurant, a dish, a \
 show), with sentiment -1..1 (how much they seemed to like it) and a few lowercase tags \
 (cuisine, genre, area).
+- ⟦place: Name · …⟧ after a link marks a Google Maps place someone shared: use Name exactly as \
+the option name or choice. "⟦location shared⟧" is an unnamed location or a home: never extract \
+anything about it.
 Return empty lists when there's nothing."""
 
 
