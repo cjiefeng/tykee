@@ -24,7 +24,10 @@ from app.brain import notes as nt
 from app.brain.store import NoteStore
 from app.db.database import Database
 from app.decisions.text import normalise
+from app.places import attributes as attrs
 from app.places import links
+from app.places.areas import Area
+from app.places.attributes import Attribute, Source
 from app.places.links import LOCATION_SHARED, ParsedPlace
 from app.places.resolver import PlaceResolver, Resolution
 from app.settings import SettingsStore
@@ -61,6 +64,8 @@ class Place:
     first_seen_at: str
     last_seen_at: str
     visit_count: int
+    status: str = "visited"  # 'unvisited': found on the web, not been yet (§10.6)
+    area_id: int | None = None
 
     def marker(self) -> str:
         return links.annotation(
@@ -99,6 +104,8 @@ def _place(r: sqlite3.Row) -> Place:
         r["first_seen_at"],
         r["last_seen_at"],
         r["visit_count"],
+        r["status"],
+        r["area_id"],
     )
 
 
@@ -116,6 +123,12 @@ def venue_url(name: str, address: str | None, google_place_id: str | None) -> st
     if google_place_id:
         params["query_place_id"] = google_place_id
     return "https://www.google.com/maps/search/?" + urlencode(params)
+
+
+def search_url(query: str) -> str:
+    """Google Maps search link (§10.6 "map links without an API"): opens the right place in
+    the Maps app for free."""
+    return "https://www.google.com/maps/search/?" + urlencode({"api": "1", "query": query})
 
 
 def _same(r: sqlite3.Row, cand: Candidate) -> bool:
@@ -195,6 +208,7 @@ GENERATED = (
     "- First mentioned:",
     "- Last mentioned:",
     "- Visits recorded:",
+    *(f"- {label}:" for label in attrs.LABELS.values()),
 )
 
 
@@ -360,7 +374,8 @@ class PlaceService:
         now = to_sql(self._clock())
         await self._db.write(
             lambda c: c.execute(
-                "UPDATE places SET visit_count = visit_count + 1, last_seen_at = ? WHERE id = ?",
+                "UPDATE places SET visit_count = visit_count + 1, last_seen_at = ?, "
+                "status = 'visited' WHERE id = ?",
                 (now, place_id),
             )
         )
@@ -415,6 +430,80 @@ class PlaceService:
         linked = await self.get(place.id)
         return await self._sync_note(linked) if linked is not None else place
 
+    # --- recommendations (§10.6) -------------------------------------------------------------
+
+    async def attributes(self, place_ids: Sequence[int]) -> dict[int, dict[str, Attribute]]:
+        ids = list(place_ids)
+        return await self._db.read(lambda c: attrs.of(c, ids))
+
+    async def set_attribute(
+        self, place_id: int, key: str, value: str, *, source: Source, evidence: str | None
+    ) -> Attribute:
+        """User values win over web ones; a user value is also written into the place note."""
+        now = self._clock()
+        attr = await self._db.write(
+            lambda c: attrs.put(c, place_id, key, value, source=source, evidence=evidence, now=now)
+        )
+        if attr.source == "user":
+            place = await self.get(place_id)
+            if place is not None:
+                await self._sync_note(place)
+        log.info("place attribute", extra={"place_id": place_id, "key": attr.key, "src": source})
+        return attr
+
+    async def remove_attribute(self, place_id: int, key: str) -> bool:
+        removed = await self._db.write(lambda c: attrs.remove(c, place_id, key))
+        place = await self.get(place_id)
+        if removed and place is not None:
+            await self._sync_note(place)
+        return removed
+
+    async def add_found(
+        self, name: str, *, area: Area | None, address: str | None, category_id: int
+    ) -> tuple[Place, bool]:
+        """A place found on the web (``save_place_candidates``): stored as 'unvisited' with no
+        coordinates and a Maps search URL. Deduped by normalised name in the same area (chains
+        elsewhere stay separate). Returns (place, created)."""
+        name = " ".join(name.split())
+        norm = normalise(name)
+        now = to_sql(self._clock())
+        url = search_url(", ".join(x for x in (name, address or (area and area.name)) if x))
+        area_id = area.id if area else None
+
+        def same_area(r: sqlite3.Row) -> bool:
+            if area is None or r["area_id"] == area.id:
+                return True
+            if r["lat"] is not None and r["lng"] is not None:
+                d = links.distance_m(r["lat"], r["lng"], area.lat, area.lng)
+                return d <= area.radius_m * 1.5
+            return r["area_id"] is None
+
+        def _go(c: sqlite3.Connection) -> tuple[Place, bool]:
+            rows = c.execute("SELECT * FROM places WHERE name_norm = ?", (norm,)).fetchall()
+            for r in rows:
+                if same_area(r):
+                    c.execute(
+                        "UPDATE places SET area_id = COALESCE(area_id, ?), "
+                        "address = COALESCE(address, ?), "
+                        "category_hint = COALESCE(category_hint, ?) WHERE id = ?",
+                        (area_id, address, category_id, r["id"]),
+                    )
+                    fresh = c.execute("SELECT * FROM places WHERE id = ?", (r["id"],)).fetchone()
+                    return _place(fresh), False
+            cur = c.execute(
+                "INSERT INTO places(name, name_norm, address, maps_url, first_seen_at, "
+                "last_seen_at, status, area_id, category_hint) "
+                "VALUES (?, ?, ?, ?, ?, ?, 'unvisited', ?, ?)",
+                (name, norm, address, url, now, now, area_id, category_id),
+            )
+            new = c.execute("SELECT * FROM places WHERE id = ?", (cur.lastrowid,)).fetchone()
+            return _place(new), True
+
+        place, created = await self._db.write(_go)
+        if created:
+            log.info("place found on web", extra={"place_id": place.id})
+        return place, created
+
     # --- dashboard (§11 Memory → Places) -----------------------------------------------------
 
     async def rename(self, place_id: int, name: str) -> Place:
@@ -447,16 +536,24 @@ class PlaceService:
         src, dst = await self.get(src_id), await self.get(dst_id)
         if src is None or dst is None:
             raise ValueError("unknown place")
+        src_hint = await self._db.read(
+            lambda c: c.execute(
+                "SELECT category_hint FROM places WHERE id = ?", (src_id,)
+            ).fetchone()[0]
+        )
 
         def _go(c: sqlite3.Connection) -> None:
             for table in ("options", "decisions", "place_links"):
                 c.execute(f"UPDATE {table} SET place_id = ? WHERE place_id = ?", (dst_id, src_id))
+            attrs.merge(c, src_id, dst_id)
             c.execute("DELETE FROM places WHERE id = ?", (src_id,))
             c.execute(
                 "UPDATE places SET visit_count = visit_count + ?, "
                 "first_seen_at = min(first_seen_at, ?), last_seen_at = max(last_seen_at, ?), "
                 "google_id = COALESCE(google_id, ?), lat = COALESCE(lat, ?), "
-                "lng = COALESCE(lng, ?), address = COALESCE(address, ?) WHERE id = ?",
+                "lng = COALESCE(lng, ?), address = COALESCE(address, ?), "
+                "area_id = COALESCE(area_id, ?), category_hint = COALESCE(category_hint, ?), "
+                "status = CASE WHEN ? = 'visited' THEN 'visited' ELSE status END WHERE id = ?",
                 (
                     src.visit_count,
                     src.first_seen_at,
@@ -465,6 +562,9 @@ class PlaceService:
                     src.lat,
                     src.lng,
                     src.address,
+                    src.area_id,
+                    src_hint,
+                    src.status,
                     dst_id,
                 ),
             )
@@ -567,7 +667,7 @@ class PlaceService:
         note.body = "\n".join(lines) + "\n"
         await self._store.write_raw(place.note_path, nt.render(note))
 
-    def _details(self, p: Place) -> str:
+    def _details(self, p: Place, user_attrs: Sequence[Attribute] = ()) -> str:
         lines = [f"- Google Maps: [{p.name}]({p.maps_url})"]
         if p.address:
             lines.append(f"- Address: {p.address}")
@@ -576,19 +676,23 @@ class PlaceService:
         lines.append(f"- First mentioned: {self._day(p.first_seen_at)}")
         lines.append(f"- Last mentioned: {self._day(p.last_seen_at)}")
         lines.append(f"- Visits recorded: {p.visit_count}")
+        lines += attrs.note_lines(user_attrs, self._day)
         return "\n".join(lines)
 
     async def _sync_note(self, place: Place) -> Place:
         """Create the place note, or rewrite only its Details section (anything learned about
         the place elsewhere in the note is kept)."""
-        if self._store is None:
-            return place
+        if self._store is None or place.status != "visited":
+            return place  # unvisited web finds get a note once they're chosen (§10.6)
         rel = await self._note_path(place)
+        found = await self._db.read(lambda c: attrs.of(c, [place.id]))
+        user_attrs = [a for a in found.get(place.id, {}).values() if a.source == "user"]
         try:
             note = await self._store.read(rel)
             if note is not None:
                 extras = details_extras(note.body)
-                content = self._details(place) + ("\n\n" + "\n".join(extras) if extras else "")
+                details = self._details(place, user_attrs)
+                content = details + ("\n\n" + "\n".join(extras) if extras else "")
                 await self._store.write(
                     rel,
                     mode="replace_section",
@@ -600,7 +704,7 @@ class PlaceService:
                 await self._store.write(
                     rel,
                     mode="create",
-                    content=f"## {DETAILS}\n\n{self._details(place)}",
+                    content=f"## {DETAILS}\n\n{self._details(place, user_attrs)}",
                     title=place.name,
                     note_type="place",
                     tags=["place"],

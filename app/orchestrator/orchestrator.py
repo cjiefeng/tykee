@@ -45,6 +45,7 @@ from app.orchestrator.web import (
     web_tools,
     with_sources,
 )
+from app.places.recommend import RecommendService
 from app.places.service import PlaceService
 from app.settings import SettingsStore
 from app.timeutil import utcnow
@@ -74,6 +75,7 @@ class Reply:
     picks: list[tuple[int, str]] = field(default_factory=list)  # (decision_id, name) → buttons
     budget_exhausted: bool = False  # §14.4: the adapter DMs the admin once a day
     recorded: list[tuple[int, int | None]] = field(default_factory=list)  # → reaction (§10.5)
+    recommendation: bool = False  # picks are find_places picks: [✅ 1] [✅ 2] … [🎲 more]
 
 
 def assistant_blocks(content: Sequence[ContentBlock]) -> list[ContentBlockParam]:
@@ -111,6 +113,7 @@ class Orchestrator:
         summarizer: Summarizer | None = None,
         memory: MemoryService | None = None,
         places: PlaceService | None = None,
+        recommend: RecommendService | None = None,
         clock: Callable[[], datetime] = utcnow,
     ) -> None:
         self._summarizer = summarizer
@@ -119,7 +122,7 @@ class Orchestrator:
         self._settings = settings
         self._llm = llm
         self._decisions = decisions
-        self._tools = ToolRouter(decisions, memory, places)
+        self._tools = ToolRouter(decisions, memory, places, recommend)
         self._users = list(users)
         self._users_by_id = {u.id: u for u in users}
         self._tz = tz
@@ -167,6 +170,7 @@ class Orchestrator:
             source=f"telegram:{chat.chat_id}",
         )
         pinned = await self._memory.pinned_block() if self._memory is not None else None
+        pets = await self._memory.pets() if self._memory is not None else []
         today = await self._decisions.today(chat.chat_id, self._tz)
         web = await web_status(self._db, s, self._tz)
         if not web.on and web.reason != "disabled":
@@ -184,6 +188,7 @@ class Orchestrator:
                     unprompted_reason=unprompted_reason,
                     web_paused=web.temporarily_off,
                     today=today,
+                    pets=pets,
                 ),
                 pinned=pinned,
                 web=web_on,
@@ -193,12 +198,14 @@ class Orchestrator:
         try:
             try:
                 extra = web_tools(s) if web.on else []
+                ctx.web_on = bool(extra)
                 resp = await self._loop(system_for(bool(extra)), messages, ctx, [*tools, *extra])
             except LLMBadRequest:
                 if not web.on or ctx.web_used:
                     raise
                 # e.g. web search disabled for the org in the Console: answer without the web.
                 log.warning("request with web tools rejected; retrying without them")
+                ctx.web_on = False
                 resp = await self._loop(system_for(False), messages, ctx, tools)
         except BudgetExceeded as e:
             log.warning("budget exhausted", extra={"period": e.period})
@@ -220,7 +227,13 @@ class Orchestrator:
                 return Reply("", from_llm=True, recorded=ctx.recorded)
             else:
                 return Reply(FALLBACK_EMPTY, from_llm=False)
-        return Reply(out, from_llm=True, picks=ctx.last_picks, recorded=ctx.recorded)
+        return Reply(
+            out,
+            from_llm=True,
+            picks=ctx.last_picks,
+            recorded=ctx.recorded,
+            recommendation=ctx.recommend is not None and bool(ctx.last_picks),
+        )
 
     async def _loop(
         self,

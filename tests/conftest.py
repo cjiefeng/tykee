@@ -26,7 +26,9 @@ from app.decisions.service import DecisionService
 from app.health import HealthState
 from app.orchestrator.orchestrator import Orchestrator
 from app.orchestrator.summary import Summarizer
+from app.places.areas import seed_areas
 from app.places.decide import SharedPlaces
+from app.places.recommend import RecommendService
 from app.places.resolver import PlaceResolver
 from app.places.service import PlaceService
 from app.settings import SettingsStore, seed_settings
@@ -74,6 +76,7 @@ async def env(tmp_path: Path) -> AsyncIterator[Env]:
 
     def _seed(conn: sqlite3.Connection) -> list[UserRecord]:
         seed_settings(conn)
+        seed_areas(conn)
         upsert_allowlist(conn, ALLOWLIST, "Asia/Singapore")
         return load_enabled(conn, ALLOWLIST)
 
@@ -181,6 +184,7 @@ class Stack:
     health: HealthState
     places: PlaceService
     shared: SharedPlaces
+    recommend: RecommendService
 
 
 def make_stack(
@@ -228,6 +232,15 @@ def make_stack(
         memory=memory,
         clock=clock,
     )
+    recommend = RecommendService(
+        db=env.db,
+        settings=env.settings,
+        places=places,
+        users_by_slug={u.slug: u.id for u in env.users},
+        clock=clock,
+        rng=random.Random(seed),
+        constraints=memory.avoid_tags,
+    )
     summarizer = Summarizer(
         db=env.db,
         settings=env.settings,
@@ -246,6 +259,7 @@ def make_stack(
         summarizer=summarizer,
         memory=memory,
         places=places,
+        recommend=recommend,
         clock=clock,
     )
     ambient = AmbientService(
@@ -273,6 +287,7 @@ def make_stack(
         topics=topics,
         health=health,
         places=shared,
+        recommend=recommend,
     )
     env.closers += [ambient.close, summarizer.close, resolver.close]
     return Stack(
@@ -291,6 +306,7 @@ def make_stack(
         health,
         places,
         shared,
+        recommend,
     )
 
 

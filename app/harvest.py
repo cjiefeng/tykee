@@ -27,7 +27,12 @@ from app.db.database import Database
 from app.db.repos.messages import StoredMessage
 from app.db.repos.users import UserRecord
 from app.decisions.service import DecisionService
-from app.extraction.schema import EXTRACTION_SCHEMA, SAFE_TOPIC_RULES, Extraction
+from app.extraction.schema import (
+    EXTRACTION_SCHEMA,
+    SAFE_TOPIC_RULES,
+    Extraction,
+    PlaceAttributeSeen,
+)
 from app.health import HealthState
 from app.llm.client import (
     BudgetExceeded,
@@ -36,6 +41,7 @@ from app.llm.client import (
     LLMRequest,
     budget_status,
 )
+from app.places import attributes as attrs
 from app.places import links as place_links
 from app.places.service import PlaceService
 from app.settings import RuntimeSettings, SettingsStore
@@ -111,8 +117,13 @@ considered, and the outcome. choice is the chosen option when outcome is "chosen
 is the ISO time of the decision.
 - options: specific named options mentioned for a kind of decision (a restaurant, a show), with \
 sentiment -1..1.
+- place_attributes: what they say first-hand about a specific named place: pets allowed \
+("brought Mochi to X, they had a water bowl" → pet_friendly yes; "dogs only outside" → \
+outdoor_only; "no dogs allowed" → no), or kid_friendly, halal, aircon, quiet (yes/no). place is \
+the place's name; quote their words (keep size limits like "small dogs only"). Never from \
+hearsay about third parties' homes.
 - ⟦place: Name · … · place_id=N⟧ after a link marks a Google Maps place someone shared: use \
-Name exactly as the option name or choice. "⟦location shared⟧" is an unnamed location or a \
+Name exactly as the option name, choice or place. "⟦location shared⟧" is an unnamed location or a \
 home: never extract anything about it.
 Return empty lists when there's nothing."""
 
@@ -464,6 +475,49 @@ class Harvester:
                 payload=payload,
             )
             result.suggestions += 1
+
+        for pa in ex.place_attributes:
+            if await self._suggest_attribute(pa, topic, source, marked):
+                result.suggestions += 1
+
+    async def _suggest_attribute(
+        self,
+        pa: PlaceAttributeSeen,
+        topic: str,
+        source: str,
+        marked: Sequence[place_links.Annotated],
+    ) -> bool:
+        """§10.6: "brought Mochi to X, they had a water bowl" → an inbox item that, approved,
+        becomes a user-sourced attribute. Only for places Tykee already knows."""
+        if self._places is None:
+            return False
+        try:
+            key, value = attrs.validate(pa.key, pa.value)
+        except attrs.AttrError:
+            return False
+        place = None
+        if (pid := place_links.match_place(pa.place, marked)) is not None:
+            place = await self._places.get(pid)
+        if place is None:
+            same = await self._places.by_name(pa.place)
+            place = same[0] if len(same) == 1 else None
+        if place is None:
+            return False
+        have = (await self._places.attributes([place.id])).get(place.id, {}).get(key)
+        if have is not None and have.source == "user" and have.value == value:
+            return False
+        label = attrs.VALUE_TEXT.get(key, attrs.DEFAULT_TEXT).get(value, value)
+        content = f"{place.name}: {attrs.LABELS[key].lower()} → {label}"
+        if await self._memory.pending_with(content):
+            return False
+        await self._memory.suggest(
+            kind="attribute",
+            content=content,
+            reason=(f'Said in {topic}: "{pa.quote}"' if pa.quote else f"Said in {topic}")[:300],
+            source=source,
+            payload={"place_id": place.id, "key": key, "value": value, "evidence": pa.quote},
+        )
+        return True
 
     async def _advance(self, group: int, thread_id: int, last_msg_id: int) -> None:
         now = to_sql(self._clock())

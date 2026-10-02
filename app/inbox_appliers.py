@@ -8,11 +8,14 @@ import logging
 from app.brain.memory import InboxItem, MemoryService
 from app.decisions.service import DecisionService
 from app.decisions.text import slugify
+from app.places.service import PlaceService
 
 log = logging.getLogger(__name__)
 
 
-def register(memory: MemoryService, decisions: DecisionService) -> None:
+def register(
+    memory: MemoryService, decisions: DecisionService, places: PlaceService | None = None
+) -> None:
     async def apply_category(item: InboxItem) -> None:
         p = item.payload
         phrase = str(p.get("phrase", "")).strip()
@@ -53,5 +56,23 @@ def register(memory: MemoryService, decisions: DecisionService) -> None:
             place_id=int(place) if isinstance(place, int) else None,
         )
 
+    async def apply_attribute(item: InboxItem) -> None:
+        """§10.6: something one of them said about a place (harvester) becomes a user-sourced
+        attribute, which beats anything found on the web."""
+        p = item.payload
+        place_id = p.get("place_id")
+        if places is None or not isinstance(place_id, int):
+            return
+        if await places.get(place_id) is None:
+            return
+        await places.set_attribute(
+            place_id,
+            str(p.get("key", "")),
+            str(p.get("value", "")),
+            source="user",
+            evidence=str(p.get("evidence") or "") or None,
+        )
+
     memory.appliers["category"] = apply_category
     memory.appliers["option"] = apply_option
+    memory.appliers["attribute"] = apply_attribute

@@ -3,22 +3,69 @@
 {% block content %}
 <a class="crumb" href="/memory">Memory</a>
 <div class="page-head"><div><h1>Places</h1>
-  <p class="lede">Shops and venues from Google Maps links shared in the chat. Only named businesses are kept; a link to a home or a bare address is never stored.</p></div></div>
+  <p class="lede">Shops and venues from Google Maps links shared in the chat, plus <b>new</b> places found on the web for recommendations. Only named businesses are kept; a link to a home or a bare address is never stored.</p></div></div>
 
-<div class="table-wrap"><table><tr><th>Place</th><th>Visits</th><th>Last mentioned</th><th>Rename</th><th>Merge into</th><th></th></tr>
+<form method="get" action="/memory/places" class="form-panel">
+  <div class="row">
+    <div><label for="f-area">Area (neighbourhood, town or MRT)</label><input id="f-area" type="text" name="area" value="{{ area }}" placeholder="Tiong Bahru"></div>
+    <div><label for="f-attr">Attribute</label><select id="f-attr" name="attr"><option value="">any</option>
+      {% for key, vals in values.items() %}<option value="{{ key }}" {{ 'selected' if attr == key }}>{{ labels[key] }}: any</option>
+      {% for v in vals %}<option value="{{ key }}:{{ v }}" {{ 'selected' if attr == key ~ ':' ~ v }}>{{ labels[key] }}: {{ v }}</option>{% endfor %}{% endfor %}</select></div>
+  </div>
+  <div class="actions"><button>Filter</button>{% if area or attr %}<a href="/memory/places">Clear</a> <span class="muted small">{{ places | length }} of {{ total }}{% if area_hit %} within {{ area_hit.radius_m }} m of {{ area_hit.name }}{% endif %}</span>{% endif %}
+  {% if area_error %}<span class="muted small">{{ area_error }}</span>{% endif %}</div>
+</form>
+
+<div class="table-wrap"><table><tr><th>Place</th><th>Visits</th><th>Last mentioned</th><th>Attributes</th><th>Rename</th><th>Merge into</th><th></th></tr>
 {% for p in places %}
 <tr><td><a href="{{ p.maps_url }}" target="_blank" rel="noopener noreferrer">{{ p.name }}</a>
   {% if p.note_path %}<div class="small"><a href="/memory/note?path={{ p.note_path | urlencode }}">{{ p.note_path }}</a></div>{% endif %}
-  {% if p.address %}<div class="muted small">{{ p.address }}</div>{% endif %}</td>
+  {% if p.address %}<div class="muted small">{{ p.address }}</div>{% endif %}
+  {% if p.status == 'unvisited' %}<span class="pill">new (from the web)</span>{% endif %}
+  {% if p.area_id in area_names %}<span class="muted small">{{ area_names[p.area_id] }}</span>{% endif %}</td>
 <td>{{ p.visit_count }}</td>
 <td class="small">{{ local(p.last_seen_at) }}</td>
+<td class="small">{% for key, a in (attrs.get(p.id) or {}).items() %}<div>{{ labels[key] }}: <b>{{ a.value }}</b>
+  <span class="pill{% if a.source == 'user' %} accent{% endif %}">{{ 'you' if a.source == 'user' else 'web' }}</span>
+  <span class="muted">{{ local(a.checked_at, '%d %b %Y') }}{% if a.evidence %} · {{ a.evidence | truncate(80, true) }}{% endif %}</span></div>{% endfor %}
+  <form method="post" action="/memory/places/{{ p.id }}/attribute" class="inline">{{ csrf_input }}
+  <select name="key" aria-label="Attribute for {{ p.name }}">{% for key in values %}<option value="{{ key }}">{{ labels[key] }}</option>{% endfor %}</select>
+  <select name="value" aria-label="Value">{% for v in ['yes', 'outdoor_only', 'no', 'unknown'] %}<option>{{ v }}</option>{% endfor %}<option value="remove">remove</option></select>
+  <input type="text" name="evidence" aria-label="Note" placeholder="e.g. small dogs only" style="max-width:140px"><button class="sm">Set</button></form></td>
 <td><form method="post" action="/memory/places/{{ p.id }}/rename" class="inline">{{ csrf_input }}
   <input type="text" name="name" aria-label="New name for {{ p.name }}" value="{{ p.name }}" style="max-width:220px"><button class="sm">Save</button></form></td>
 <td>{% if places | length > 1 %}<form method="post" action="/memory/places/{{ p.id }}/merge" class="inline" onsubmit="return confirm('Merge {{ p.name }} into the selected place? Decisions, options and notes move over.')">{{ csrf_input }}
   <select name="into" aria-label="Merge {{ p.name }} into" style="max-width:200px">{% for o in places if o.id != p.id %}<option value="{{ o.id }}">{{ o.name }}</option>{% endfor %}</select><button class="sm">Merge</button></form>{% endif %}</td>
 <td><form method="post" action="/memory/places/{{ p.id }}/delete" class="inline" onsubmit="return confirm('Delete {{ p.name }} and its note?')">{{ csrf_input }}<button class="sm danger">Delete</button></form></td></tr>
-{% else %}<tr><td colspan="6">No places yet. Share a Google Maps link in the group and it shows up here.</td></tr>{% endfor %}
+{% else %}<tr><td colspan="7">{% if area or attr %}No places match.{% else %}No places yet. Share a Google Maps link in the group and it shows up here.{% endif %}</td></tr>{% endfor %}
 </table></div>
+
+<p class="help">Attributes you set here count as <b>confirmed by you</b>, which always beats a label found on the web; only yours are written into the place's note. <code>outdoor_only</code> is for pet-friendly only.</p>
+
+<h2 id="areas">Your areas</h2>
+<p class="lede">Name a neighbourhood so "near home" works. It copies that area's centre and radius, so Tykee never knows an exact address.</p>
+<div class="table-wrap"><table><tr><th>Name</th><th>Around</th><th>Also called</th><th></th></tr>
+{% for u in user_areas %}<tr><td>{{ u.area.name }}</td><td>{{ u.like }} <span class="muted small">({{ u.area.radius_m }} m)</span></td><td class="small">{{ u.aliases | join(', ') }}</td>
+<td><form method="post" action="/memory/places/areas/{{ u.area.id }}/delete" class="inline">{{ csrf_input }}<button class="sm danger">Remove</button></form></td></tr>
+{% else %}<tr><td colspan="4">None yet.</td></tr>{% endfor %}
+</table></div>
+<form method="post" action="/memory/places/areas" class="form-panel">{{ csrf_input }}
+  <div class="row">
+    <div><label for="a-name">Name</label><input id="a-name" type="text" name="name" placeholder="Home" required></div>
+    <div><label for="a-like">Around (neighbourhood, town or MRT)</label><input id="a-like" type="text" name="like" placeholder="Bishan" required></div>
+    <div><label for="a-aliases">Also called (comma-separated)</label><input id="a-aliases" type="text" name="aliases" placeholder="home, us, our place"></div>
+  </div>
+  <div class="actions"><button class="primary">Save area</button></div>
+</form>
+
+<h2 id="pets">Pets</h2>
+<p class="lede">Stored in <code>shared/household.md</code>. Mentioning a pet by name makes pet-friendly a must-have.</p>
+<form method="post" action="/memory/places/pets" class="form-panel">{{ csrf_input }}
+  <label for="pets">One per line: <code>name species [small|medium|large]</code></label>
+  <textarea id="pets" name="pets" rows="3" placeholder="Mochi dog small">{% for p in pets %}{{ p.name }} {{ p.species }}{% if p.size %} {{ p.size }}{% endif %}
+{% endfor %}</textarea>
+  <div class="actions"><button class="primary">Save pets</button></div>
+</form>
 
 <h2>Recent links</h2>
 <div class="table-wrap"><table><tr><th>Link</th><th>Status</th><th>Place</th><th>Tries</th><th>When</th></tr>

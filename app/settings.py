@@ -255,6 +255,11 @@ class RuntimeSettings(BaseModel):
     places_intent_phrases: list[str] = Field(default_factory=list)
     places_intent_window_s: int = Field(120, ge=0, le=3600)
     places_meal_slots: list[MealSlot] = Field(default_factory=list)
+    recommend_default_n: int = Field(3, ge=1, le=5)
+    recommend_default_radius_m: int = Field(1500, ge=200, le=10000)
+    recommend_explore_ratio: float = Field(0.34, ge=0, le=1)
+    recommend_web_attr_ttl_days: int = Field(180, ge=1)
+    recommend_max_web_searches: int = Field(2, ge=0, le=5)
 
     @field_validator("places_reaction")
     @classmethod

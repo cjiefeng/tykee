@@ -60,6 +60,24 @@ def decision_keyboard(picks: Sequence[tuple[int, str]]) -> Keyboard | None:
     ]
 
 
+_MORE = re.compile(r"^r:(\d+)$")
+
+
+def recommend_keyboard(picks: Sequence[tuple[int, str]], first: int = 1) -> Keyboard | None:
+    """§10.6: [✅ 1] [✅ 2] [✅ 3] [🎲 more] for numbered place recommendations."""
+    if not picks:
+        return None
+    row = [
+        Button(f"✅ {first + i}", callback_data(did, "accept")) for i, (did, _) in enumerate(picks)
+    ]
+    return [row, [Button("🎲 more", f"r:{picks[0][0]}")]]
+
+
+def parse_more(data: str | None) -> int | None:
+    m = _MORE.match(data or "")
+    return int(m.group(1)) if m else None
+
+
 _INBOX = re.compile(r"^m:(\d+):([ax])$")
 
 

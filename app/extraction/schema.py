@@ -20,6 +20,9 @@ Count such discussions in skipped_out_of_scope and produce nothing else for them
 item mentions money ("the cheaper one"), keep the choice and drop the money detail."""
 
 _STR = {"type": "string"}
+# §10.6 place attributes (kept in step with app.places.attributes.VALUES; no import, so the
+# schema module stays dependency-free).
+PLACE_ATTRIBUTE_KEYS = ("pet_friendly", "kid_friendly", "halal", "aircon", "quiet")
 _NUM = {"type": "number"}
 
 EXTRACTION_SCHEMA: dict[str, Any] = {
@@ -102,9 +105,23 @@ EXTRACTION_SCHEMA: dict[str, Any] = {
                 "additionalProperties": False,
             },
         },
+        "place_attributes": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "place": _STR,
+                    "key": {"type": "string", "enum": list(PLACE_ATTRIBUTE_KEYS)},
+                    "value": _STR,
+                    "quote": _STR,
+                },
+                "required": ["place", "key", "value", "quote"],
+                "additionalProperties": False,
+            },
+        },
         "skipped_out_of_scope": {"type": "integer"},
     },
-    "required": ["episodes", "facts", "options", "skipped_out_of_scope"],
+    "required": ["episodes", "facts", "options", "place_attributes", "skipped_out_of_scope"],
     "additionalProperties": False,
 }
 
@@ -159,8 +176,16 @@ class OptionSeen(BaseModel):
     sentiment: float = 0.0
 
 
+class PlaceAttributeSeen(BaseModel):
+    place: str
+    key: str
+    value: str
+    quote: str = ""
+
+
 class Extraction(BaseModel):
     episodes: list[Episode] = Field(default_factory=list)
     facts: list[Fact] = Field(default_factory=list)
     options: list[OptionSeen] = Field(default_factory=list)
+    place_attributes: list[PlaceAttributeSeen] = Field(default_factory=list)
     skipped_out_of_scope: int = 0

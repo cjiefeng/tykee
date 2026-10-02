@@ -40,7 +40,9 @@ from app.logging import LOG_BUFFER, setup_logging
 from app.nudges import NudgeService
 from app.orchestrator.orchestrator import Orchestrator
 from app.orchestrator.summary import Summarizer
+from app.places.areas import seed_areas
 from app.places.decide import SharedPlaces
+from app.places.recommend import RecommendService
 from app.places.resolver import PlaceResolver
 from app.places.service import PlaceService
 from app.scheduler import Scheduler
@@ -92,6 +94,7 @@ async def run(env: Env) -> None:
     def _bootstrap(conn: sqlite3.Connection) -> tuple[int | None, list[UserRecord]]:
         seed_answer_topic(conn, env.group_topic_id)  # before seeds: env only fills a missing key
         seed_settings(conn)
+        seed_areas(conn)
         upsert_allowlist(conn, allowlist, env.tz)
         return resolve_group_id(conn, env.group_chat_id), load_enabled(conn, allowlist)
 
@@ -160,9 +163,16 @@ async def run(env: Env) -> None:
             tz=tz,
             memory=memory,
         )
+        recommend = RecommendService(
+            db=db,
+            settings=settings,
+            places=places,
+            users_by_slug={u.slug: u.id for u in users},
+            constraints=memory.avoid_tags,
+        )
         registry = GroupRegistry(db, group_id)
         topics = TopicService(db=db, settings=settings, group_id=lambda: registry.group_id)
-        inbox_appliers.register(memory, decisions)
+        inbox_appliers.register(memory, decisions, places)
         summarizer = Summarizer(
             db=db,
             settings=settings,
@@ -181,6 +191,7 @@ async def run(env: Env) -> None:
             summarizer=summarizer,
             memory=memory,
             places=places,
+            recommend=recommend,
         )
         ambient = AmbientService(
             db=db,
@@ -206,6 +217,7 @@ async def run(env: Env) -> None:
             topics=topics,
             health=health,
             places=shared_places,
+            recommend=recommend,
         )
         dp = Dispatcher()
         dp.update.outer_middleware(
