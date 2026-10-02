@@ -58,16 +58,27 @@ def recent(conn: sqlite3.Connection, chat_id: int, limit: int) -> list[StoredMes
         "ORDER BY id DESC LIMIT ?",
         (chat_id, limit),
     ).fetchall()
-    return [
-        StoredMessage(
-            id=r["id"],
-            chat_id=r["chat_id"],
-            tg_message_id=r["tg_message_id"],
-            user_id=r["user_id"],
-            role=r["role"],
-            kind=r["kind"],
-            text=_text_of(r["content"]),
-            created_at=r["created_at"],
-        )
-        for r in reversed(rows)
-    ]
+    return [_row(r) for r in reversed(rows)]
+
+
+def _row(r: sqlite3.Row) -> StoredMessage:
+    return StoredMessage(
+        id=r["id"],
+        chat_id=r["chat_id"],
+        tg_message_id=r["tg_message_id"],
+        user_id=r["user_id"],
+        role=r["role"],
+        kind=r["kind"],
+        text=_text_of(r["content"]),
+        created_at=r["created_at"],
+    )
+
+
+def after(conn: sqlite3.Connection, chat_id: int, after_id: int) -> list[StoredMessage]:
+    """User/assistant rows with id > ``after_id``, oldest first (for summarisation)."""
+    rows = conn.execute(
+        "SELECT * FROM messages WHERE chat_id = ? AND id > ? AND role IN ('user', 'assistant') "
+        "ORDER BY id",
+        (chat_id, after_id),
+    ).fetchall()
+    return [_row(r) for r in rows]

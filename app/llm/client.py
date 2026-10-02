@@ -10,7 +10,7 @@ import logging
 import sqlite3
 from collections.abc import Sequence
 from dataclasses import dataclass, field
-from typing import Literal, Protocol
+from typing import Any, Literal, Protocol
 from zoneinfo import ZoneInfo
 
 import anthropic
@@ -62,6 +62,7 @@ class LLMRequest:
     max_tokens: int | None = None  # None → settings llm.max_tokens
     tools: Sequence[ToolParam] = field(default_factory=tuple)
     tool_choice: ToolChoiceParam | None = None
+    json_schema: dict[str, Any] | None = None  # structured output (output_config.format)
     user_id: int | None = None
     chat_id: int | None = None
     import_job_id: int | None = None
@@ -154,6 +155,11 @@ class AnthropicLLMClient:
                 messages=list(req.messages),
                 tools=list(req.tools) if req.tools else anthropic.omit,
                 tool_choice=req.tool_choice if req.tool_choice is not None else anthropic.omit,
+                output_config=(
+                    {"format": {"type": "json_schema", "schema": req.json_schema}}
+                    if req.json_schema is not None
+                    else anthropic.omit
+                ),
             )
         except anthropic.AuthenticationError as e:
             self.auth_failed = True

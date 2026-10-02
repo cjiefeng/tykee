@@ -129,3 +129,16 @@ async def test_budget_exhausted_blocks_call(env: Env) -> None:
         await _client(env, script).complete(_req(env))
     assert ei.value.period == "daily"
     assert script.requests == []
+
+
+async def test_json_schema_becomes_output_config(env: Env) -> None:
+    model = seed_values()["models.judge"]
+    script = Script(httpx2.Response(200, json=_ok_body(model)))
+    schema = {"type": "object", "properties": {}, "additionalProperties": False}
+    req = _req(env)
+    req.model_role = "judge"
+    req.json_schema = schema
+    await _client(env, script).complete(req)
+    sent = json.loads(script.requests[0].content)
+    assert sent["output_config"] == {"format": {"type": "json_schema", "schema": schema}}
+    assert "tool_choice" not in sent and "tools" not in sent

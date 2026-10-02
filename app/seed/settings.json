@@ -12,5 +12,16 @@
   "llm.max_tokens": 400,
   "budget.daily_usd": 1.0,
   "budget.monthly_usd": 15.0,
-  "decisions.session_hours": 6
+  "decisions.session_hours": 6,
+  "ambient.enabled": true,
+  "ambient.debounce_s": 30,
+  "ambient.threshold": 0.75,
+  "ambient.cooldown_min": 20,
+  "ambient.max_per_day": 5,
+  "ambient.window_messages": 20,
+  "ambient.default_mute_min": 120,
+  "ambient.negative_window_min": 15,
+  "ambient.negative_phrases": ["not now", "didn't ask", "didnt ask", "nobody asked", "no one asked", "not helpful"],
+  "ambient.mute_phrases": ["bot shh", "shh bot", "bot keep quiet", "bot be quiet", "bot quiet", "tykee shh", "tykee keep quiet", "tykee be quiet"],
+  "summary.batch": 20
 }
