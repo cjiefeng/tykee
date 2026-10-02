@@ -1,0 +1,18 @@
+{% set w = progress.windows %}{% set total = (w.values() | sum) or 1 %}{% set finished = w.get('done', 0) + w.get('failed', 0) %}
+<div id="import-progress" hx-get="/import/{{ job.id }}/progress" hx-trigger="every 5s" hx-swap="outerHTML">
+  <div class="grid">
+    <div class="card"><h3>Extracting</h3>
+      <div class="big">{{ finished }} / {{ total }} windows</div>
+      <div class="bar"><span style="width:{{ (100 * finished / total) | round(0) }}%"></span></div>
+      <div class="muted small">{% if w.get('submitted') %}{{ w.submitted }} in the batch (usually done within the hour){% endif %}{% if w.get('pending') %} · {{ w.pending }} waiting{% endif %}{% if w.get('failed') %} · <span class="warn">{{ w.failed }} failed</span>{% endif %}</div>
+    </div>
+    <div class="card"><h3>Consolidating</h3>
+      <div class="big">{% if job.status == 'consolidating' %}running{% elif job.status == 'extracting' %}next{% else %}done{% endif %}</div>
+      <div class="muted small">Opus designs categories from the decisions found, then merges facts into notes.</div>
+    </div>
+    <div class="card"><h3>Cost so far</h3><div class="big">{{ progress.spent_usd | usd }}</div>
+      <div class="muted small">estimate {{ (job.est_cost_usd or 0) | usd }}</div></div>
+  </div>
+  {% if job.error %}<p class="warn small">Last problem: {{ job.error }} (retrying automatically)</p>{% endif %}
+  <p class="muted small">Safe to close this page; the job keeps running. Updated {{ local(job.polled_at) if job.polled_at else 'just now' }}.</p>
+</div>

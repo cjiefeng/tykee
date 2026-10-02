@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **Status** | Draft v1.21 (M4 dashboard: security details, raw settings editor, budget DM) |
+| **Status** | Draft v1.22 (M5 import: implementation notes, import spend vs the daily cap) |
 | **Name** | Tykee: phonetic spelling of Tyche, the Greek goddess of chance. Telegram handle e.g. `@TykeeBot` (must end in "bot") |
 | **Author** | Jack |
 | **Date** | 2026-10-01 |
@@ -979,7 +979,7 @@ All settings are read from SQLite on each request, so changes apply instantly wi
 - **Settings:** besides the purpose-built pages, a **Settings** page lists every key as JSON. Every dashboard write is validated against the whole settings set (`RuntimeSettings`) before it's saved, so a typo never reaches the running bot. Persona edits keep the last 20 versions in `persona.history`, restorable from Behaviour.
 - **Restart needed for:** user display names/timezones (users are loaded at startup) and `embedding.precision`.
 - **Budget:** tiles turn amber at `budget.warn_ratio` (0.8) and red at 100%. When a reply hits the cap, the admin gets one Telegram DM per household day (§14.4).
-- **Not built in M4:** the `/think` escalation heuristic (§7.1) has no dashboard control because it doesn't exist yet; `models.escalated` is editable for when it does. Import (M5) and backups (M6) show placeholders.
+- **Not built in M4:** the `/think` escalation heuristic (§7.1) has no dashboard control because it doesn't exist yet; `models.escalated` is editable for when it does. Backups (M6) show a placeholder; the Import page arrived in M5 (§15.6).
 
 ---
 
@@ -1005,6 +1005,7 @@ All settings are read from SQLite on each request, so changes apply instantly wi
 
 - Every Claude response's `usage` block is recorded with computed cost (price table in `settings`).
 - `budget.daily_usd` and `budget.monthly_usd` caps: at 80% → dashboard warning; at 100% → fallback mode (§8.5) until reset.
+- **Bootstrap import (v1.22):** import spend (`usage.import_job_id` set) counts against the **monthly** cap only. A one-off $3–10 job would otherwise exhaust the $1 daily cap and put chat into fallback mode for the rest of the day. The wizard refuses to start when the estimate exceeds what's left of the month, and import calls are still blocked once the monthly cap is reached.
 - Levers: Haiku-tier by default, prompt caching on static system blocks, history capped at N turns plus rolling summary, `max_tokens` capped (default 400) for replies.
 - Web search (M7): per-search fee + extra input tokens; capped per reply and per day, and disabled first when the budget reaches 80% (§7.5).
 
@@ -1278,6 +1279,21 @@ Both people's raw messages are sent to the Anthropic API during extraction, so b
 - **Idempotent:** the same export (`file_sha256`) can't be imported twice. A later export overlapping the same period is deduped by `(chat_ref, telegram message id)`.
 - **Cost:** two people over 6 months is plausibly 10–30k messages, i.e. a few hundred thousand input tokens. Defaults are **Opus-tier for both stages**: the import is a one-off whose quality defines the bot's day-one memory, and Opus is noticeably better at implicit preferences, Singlish and half-finished decisions. Rough estimate at current pricing: ~$2 extraction (batch) + ~$1.60 consolidation ≈ **$3–4** total; even at 3× the token estimate, ~$10 once. Both stages remain configurable (`models.import_extract`, `models.import_consolidate`); a cheaper Haiku/Sonnet run can be piloted on one month and compared in the review screen. The dashboard shows an estimate before submission and the job counts against the monthly budget.
 - **Tuning:** review the proposed categories before approving anything else; approved categories and their aliases become what the resolver (§8.1) matches against.
+
+### 15.6 Implementation notes (M5)
+
+- **Code:** `app/importer/` (`telegram.py` parser, `windowing.py`, `prompts.py`, `consolidate.py` deterministic steps, `jobs.py` queries + review edits, `service.py` job state machine and apply); `app/dashboard/views_import.py`; migration `0007_import.sql`. The scheduler's `import` job ticks every minute.
+- **Job states:** `uploaded → configured → extracting → consolidating → review → applying → done` (or `failed`/`cancelled`). Re-uploading the file of a cancelled/failed job reopens that job (usage rows keep pointing at it).
+- **Upload:** the dashboard streams to `/data/imports/upload-*.part`, hashes it, and renames it to `<sha256>.json` (a zip's `result.json` is extracted instead). Size is checked from `Content-Length` and again while copying. Half-written uploads are swept at startup.
+- **Steps ③ + ④ are one form** (chats, date range, sender mapping), then ⑤ windows the selection and shows the preview. Date range is by household-local date, default the last 183 days.
+- **Windowing:** gaps over 2 h or ~6k estimated tokens start a new window; only a *size* split repeats the last 10 messages, as context above a `--- new ---` line, and extraction reads only after the marker (same convention as the harvester), so overlap rarely produces duplicate episodes. Consolidation still de-duplicates (same normalised kind + choice within 3 h).
+- **Dedupe across exports:** each window stores its first/last Telegram message id; a later import skips messages inside ranges of live (not cancelled/failed) jobs for the same `chat_ref` (the Telegram chat id).
+- **Estimate:** tokens are estimated from characters (~3.5 chars/token for Latin text, 1 per CJK character), not counted via the API, so the preview is an estimate, deliberately on the high side (thinking is billed as output on Opus-tier models).
+- **Extraction:** one Message Batch per round of pending windows (`max_tokens` 16k, structured output with the shared extraction schema). Batches are polled every `import.poll_min` (5) minutes; a window that errors or returns invalid JSON goes back to pending, up to 3 attempts, then `failed` (skipped). Batch usage rows are written when results are collected, at 50% of the list price.
+- **Consolidation:** one Opus call designs the categories from all episodes (short ids `E1…`, existing categories listed so their slugs are reused), validated in code (§15.3.2 step 4; minimum support also enforced in code, except when mapping into an existing category). Facts are **not** clustered by embedding: low-confidence (< 0.6) facts survive only if another fact for the same owner says much the same, then **one Opus call per owner** (each user + shared) merges them into notes: topic notes under `memories/<owner>/` / `shared/topics/`, hard constraints into the pinned profile (`people/<owner>.md`, `shared/household.md`, under `## Constraints`). If the episode list ever outgrows one call, the job fails with a clear error and a shorter date range is the fix (six months fits comfortably in a 1M context). Each call's result is cached on the job, so a retry (up to 3 attempts, every poll interval) never pays twice. Calls stream (`max_tokens` 32k).
+- **Options:** names are matched with rapidfuzz ratio ≥ 90 on the normalised name, per category, including the category's existing options. Stances score chosen +1, proposed +0.3, rejected −0.8 (extracted option mentions use their sentiment). Suggested `base_weight = clamp(1 + 0.5·mean, 0.5, 1.5)`; per-user pref `clamp(1 + 0.4·mean of that user's stances, 0.6, 1.4)`, inserted only where no live pref exists.
+- **Review:** items are `category | option | note | decision | unmapped`; statuses `pending | approved | rejected | merged | applied` (`info`/`assigned` for unmapped). Options and decisions point at their category proposal (`category_item_id`), so rename/merge carries them along and a rejected category skips them at apply. Unmapped episodes can be assigned to a category (a chosen one becomes a decision item).
+- **Apply:** categories (created with `created_by='import'`, or mapped into an existing one), aliases, options, prefs and decisions (`source='import'`, `status='accepted'`, original timestamp) in one transaction; then notes through `NoteStore` (`source: import:<job_id>`). Items are marked `applied` as they land, so a retry after a failure never doubles up. Then window text and per-window results are nulled, `VACUUM` runs, and the export file is deleted unless unticked. Evidence quotes on review items are kept.
 
 ---
 

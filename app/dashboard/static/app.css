@@ -49,3 +49,16 @@ pre { padding:.6rem; overflow:auto; white-space:pre-wrap; }
 .login { max-width:320px; margin:12vh auto; }
 .msg { padding:.35rem 0; border-bottom:1px dashed var(--line); }
 .msg .who { font-weight:600; } .msg.assistant .who { color:var(--accent); } .msg.tool { color:var(--muted); font-size:.85rem; }
+/* Import wizard (§15.2) */
+ol.steps { display:flex; flex-wrap:wrap; gap:.3rem; list-style:none; padding:0; margin:0 0 1rem; counter-reset:step; }
+ol.steps li { counter-increment:step; padding:.15rem .6rem; border-radius:999px; background:var(--code); color:var(--muted); font-size:.8rem; }
+ol.steps li::before { content:counter(step) ". "; }
+ol.steps li.on { background:var(--accent); color:#fff; } ol.steps li.done { color:var(--ok); }
+nav.tabs { display:flex; gap:.2rem; flex-wrap:wrap; margin:1rem 0 .4rem; border-bottom:1px solid var(--line); }
+nav.tabs a { padding:.35rem .7rem; text-decoration:none; color:var(--muted); border-radius:6px 6px 0 0; }
+nav.tabs a.on { color:var(--fg); background:var(--card); border:1px solid var(--line); border-bottom-color:var(--card); margin-bottom:-1px; }
+.quote { color:var(--muted); font-size:.8rem; border-left:2px solid var(--line); padding-left:.4rem; margin:.25rem 0; }
+.pill.st-approved, .pill.st-applied, .pill.st-done { color:var(--ok); }
+.pill.st-rejected, .pill.st-failed, .pill.st-cancelled { color:var(--bad); }
+.pill.st-extracting, .pill.st-consolidating, .pill.st-review { color:var(--warn); }
+details summary { cursor:pointer; color:var(--accent); }

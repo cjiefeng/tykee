@@ -342,8 +342,9 @@ def build_options(
         for u in who:
             if u in users:
                 p.by_user.setdefault(u, []).append(score)
-        if quote and len(p.evidence) < MAX_EVIDENCE:
-            p.evidence.append({"date": f"{ts.astimezone(tz):%Y-%m-%d}", "quote": quote})
+        entry = {"date": f"{ts.astimezone(tz):%Y-%m-%d}", "quote": quote}
+        if quote and len(p.evidence) < MAX_EVIDENCE and entry not in p.evidence:
+            p.evidence.append(entry)
 
     for rec in episodes:
         slug = category_of.get(rec.id)

@@ -117,6 +117,11 @@ class ImportService:
 
     # --- ① upload, ② validate ----------------------------------------------------------------
 
+    def sweep(self) -> None:
+        """Startup: drop half-written uploads left by a crash."""
+        for part in self.imports_dir.glob("upload-*.part"):
+            part.unlink(missing_ok=True)
+
     def export_path(self, job: Job) -> Path:
         return self.imports_dir / f"{job.file_sha256}.json"
 
