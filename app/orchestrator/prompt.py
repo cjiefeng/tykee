@@ -125,6 +125,7 @@ def dynamic_context(
     web_paused: bool = False,
     today: Sequence[TodayDecision] = (),
     pets: Sequence[Pet] = (),
+    think: bool = False,
 ) -> str:
     local = now.astimezone(ZoneInfo(actor.timezone))
     lines = [
@@ -158,6 +159,12 @@ def dynamic_context(
         lines.append(
             "Live web lookups are paused right now (daily limit or budget). If the answer needs "
             "live info, say you can't check it right now."
+        )
+    if think:
+        lines.append(
+            'They asked you to think this through (/think or "think hard"): weigh the '
+            "options and trade-offs properly and give a fuller answer than usual, still plain "
+            "and to the point. Randomness still comes from random_pick, never from you."
         )
     if unprompted_reason:
         lines.append(

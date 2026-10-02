@@ -49,6 +49,9 @@ All tooling runs inside Docker (no local Python/uv needed).
 - `app/orchestrator/`: prompt assembly (§7.2), history replay, Claude tool loop (max 6
   iterations, then `tool_choice: none`), tool schemas + router in `tools.py`, fallback (§8.5),
   rolling chat summaries (`summary.py`, background, one run per chat at a time).
+  `escalation.py` (§7.1, pure): reply model tier from `/think` (`models.escalated`),
+  `/thinkharder` (`models.deep`), `escalation.*` phrases and message length; the orchestrator
+  drops to the default tier past the budget warn ratio and for unprompted replies.
   `web.py` (§7.5): web search/fetch server tools, gate (switch → daily search cap → budget
   warn ratio), result readers; web-assisted turns can only propose memories, never write notes.
 - `app/brain/`: second brain (§6). `notes.py` (pure: paths, frontmatter, edit modes, chunking,
@@ -81,6 +84,17 @@ All tooling runs inside Docker (no local Python/uv needed).
   `recommend.py` (`RecommendService`: locate → linked-places pool → must-have filter → score →
   weighted pick with an explore slot; web finds via `save_place_candidates`). Picks are
   `decisions` rows with `context_json = {"recommend": …}`; buttons `[✅ n]` + `[🎲 more]` (`r:<id>`).
+- `app/reader/`: read-only account reader (§10.7, M10). `telethon_reader.py` is the **only**
+  module importing Telethon: `ReadOnlyTelegramReader` (public surface = `ALLOWED_OPERATIONS`,
+  allowlist + consent + `reader.enabled` re-checked in the DB on every read, `receive_updates=False`)
+  and the shell login. `models.py` (plain types, `Reader` protocol), `session.py` (Fernet-encrypted
+  `StringSession` in `/data/reader.session.enc`, key from env), `chats.py` (pure: ref parsing,
+  guard rails), `service.py` (`ReaderService`: polling into `messages` with
+  `source='account_reader'`, retention, add/consent/remove/Disconnect/Backfill, audit), `login.py`
+  (`python -m app.reader.login`). Reader chats are harvested by `Harvester` as their own targets.
+  **Every query on `messages` by `chat_id` must filter by `source`** (a DM's peer id equals the
+  bot's DM chat_id); a test greps `app/` for it. Dashboard page: `views_reader.py`
+  (`/system/reader`, step-up password for add/consent).
 - `app/dashboard/`: FastAPI + Jinja2 + vendored HTMX (§11), served by uvicorn inside the bot's
   event loop. `core.py` (LAN-only, argon2 login + lockout, sessions, CSRF, `render()`),
   `queries.py` (all dashboard SQL + validated `save_settings`), `views_*.py` per page (Places:
@@ -102,6 +116,9 @@ All tooling runs inside Docker (no local Python/uv needed).
   container with `uv run python -m scripts.embedding_eval all <cache dir>`).
 - Recommendation tests (`tests/unit/test_recommend.py`): `add_place(...)` seeds places/options/
   attributes directly; web is off unless `setup(..., web=True)` (the seed turns it on).
+- Reader tests (`tests/unit/test_reader.py`): `Rig(env, stack, FakeReader(...), tmp)` wires a
+  `ReaderService` with `tests/fakes/fake_reader.py`, a real `Harvester` and `ImportService`;
+  `msg(id, text, sender)` builds `ReaderMessage`s. The first poll only sets the starting point.
 - Place tests: `make_stack(env, redirects={short: target})` wires an `httpx.MockTransport` into the
   resolver (anything else is a 404); `url_entities(text, *urls)` builds Telegram `url` entities.
 - `tests/fakes/`: `FakeLLMClient` (scripted text / `tool_call(...)` / exceptions), `FakeGateway`,

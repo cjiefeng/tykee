@@ -10,6 +10,8 @@ models--*/
 *.onnx
 **/imports/*.json
 **/imports/*.zip
+*.session
+*.session.enc
 .venv/
 __pycache__/
 *.pyc

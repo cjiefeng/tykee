@@ -39,6 +39,9 @@ class HealthState:
     last_vault_status: str | None = None
     web_rejected: str | None = None  # the API's 400 for a request carrying web tools (§7.5)
     web_rejected_at: datetime | None = None
+    reader_state: str = "off"  # §10.7: 'off' | 'not_logged_in' | 'ok' | 'revoked' | 'error'
+    reader_error: str | None = None
+    reader_last_poll_at: datetime | None = None
 
     def backup_done(self, vault_status: str) -> None:
         self.last_backup_at = utcnow()

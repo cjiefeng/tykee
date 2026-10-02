@@ -26,6 +26,13 @@
     {% for key in numbers %}<div><label for="n-{{ loop.index }}">{{ key }}</label><input id="n-{{ loop.index }}" type="number" step="any" name="{{ key }}" value="{{ raw.get(key, '') }}"></div>{% endfor %}
   </div>
   <label class="check"><input type="checkbox" name="memory.auto_approve" {{ 'checked' if s.memory_auto_approve }}> Auto-approve implicit memories (skip the inbox; web facts still need review)</label>
+  <h3>Thinking harder</h3>
+  <p class="help">Replies use <code>models.default</code>. <code>/think</code>, a "think" phrase or a message of at least <code>escalation.long_message_chars</code> characters (0 = off) uses <code>models.escalated</code>; <code>/thinkharder</code> or a "think harder" phrase uses <code>models.deep</code>. Those replies may use up to <code>escalation.max_tokens</code>. Above the budget warn ratio, and for unprompted replies, the default model is always used.</p>
+  <label class="check"><input type="checkbox" name="escalation.enabled" {{ 'checked' if s.escalation_enabled }}> Escalate on phrases and long messages (the commands always work)</label>
+  <div class="row">
+    <div><label for="e-think">Phrases → models.escalated (one per line)</label><textarea id="e-think" name="escalation.think_phrases">{{ s.escalation_think_phrases | join('\n') }}</textarea></div>
+    <div><label for="e-deep">Phrases → models.deep (one per line, checked first)</label><textarea id="e-deep" name="escalation.deep_phrases">{{ s.escalation_deep_phrases | join('\n') }}</textarea></div>
+  </div>
   <p class="help">Model IDs need a matching <code>pricing.&lt;model&gt;</code> entry in <a href="/settings">Settings</a> for cost tracking.
   Embedding precision (<code>embedding.precision</code>) applies after a restart.</p>
   <div class="actions"><button class="primary">Save</button></div>

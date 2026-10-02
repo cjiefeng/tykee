@@ -129,8 +129,9 @@ class TopicService:
                 return
             c.execute(
                 "INSERT INTO topic_harvest(chat_id, thread_id, last_msg_id) "
-                "SELECT ?, ?, COALESCE(MAX(id), 0) FROM messages WHERE chat_id = ? "
-                "AND thread_id = ? ON CONFLICT(chat_id, thread_id) DO UPDATE SET "
+                "SELECT ?, ?, COALESCE(MAX(id), 0) FROM messages "
+                "WHERE source = 'bot' AND chat_id = ? AND thread_id = ? "
+                "ON CONFLICT(chat_id, thread_id) DO UPDATE SET "
                 "last_msg_id = MAX(topic_harvest.last_msg_id, excluded.last_msg_id)",
                 (group, old, group, old),
             )
@@ -202,10 +203,10 @@ class TopicService:
         rows = await self._db.read(
             lambda c: c.execute(
                 "SELECT t.thread_id, t.name, t.closed, "
-                "(SELECT COUNT(*) FROM messages m WHERE m.chat_id = t.chat_id "
-                " AND m.thread_id = t.thread_id) AS n, "
-                "(SELECT MAX(created_at) FROM messages m WHERE m.chat_id = t.chat_id "
-                " AND m.thread_id = t.thread_id) AS last "
+                "(SELECT COUNT(*) FROM messages m WHERE m.source = 'bot' "
+                " AND m.chat_id = t.chat_id AND m.thread_id = t.thread_id) AS n, "
+                "(SELECT MAX(created_at) FROM messages m WHERE m.source = 'bot' "
+                " AND m.chat_id = t.chat_id AND m.thread_id = t.thread_id) AS last "
                 "FROM forum_topics t WHERE t.chat_id = ? ORDER BY t.thread_id",
                 (chat_id,),
             ).fetchall()

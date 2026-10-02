@@ -15,6 +15,7 @@ from pydantic import ValidationError
 
 from app.brain import index
 from app.db.database import Database
+from app.db.repos import messages as messages_repo
 from app.db.repos import usage as usage_repo
 from app.settings import RuntimeSettings, set_value
 from app.timeutil import local_day_start, local_month_start, to_sql
@@ -195,8 +196,8 @@ async def category_detail(db: Database, category_id: int) -> dict[str, Any] | No
 async def chats(db: Database) -> list[sqlite3.Row]:
     return await db.read(
         lambda c: c.execute(
-            "SELECT chat_id, COUNT(*) AS n, MAX(created_at) AS last FROM messages "
-            "GROUP BY chat_id ORDER BY last DESC"
+            "SELECT source, chat_id, COUNT(*) AS n, MAX(created_at) AS last FROM messages "
+            "GROUP BY source, chat_id ORDER BY last DESC"
         ).fetchall()
     )
 
@@ -213,11 +214,16 @@ class TranscriptLine:
 
 
 async def transcript(
-    db: Database, chat_id: int, names: dict[int, str], limit: int = 200
+    db: Database,
+    chat_id: int,
+    names: dict[int, str],
+    limit: int = 200,
+    source: messages_repo.Source = messages_repo.BOT,
 ) -> list[TranscriptLine]:
     rows = await db.read(
         lambda c: c.execute(
-            "SELECT * FROM messages WHERE chat_id = ? ORDER BY id DESC LIMIT ?", (chat_id, limit)
+            "SELECT * FROM messages WHERE source = ? AND chat_id = ? ORDER BY id DESC LIMIT ?",
+            (source, chat_id, limit),
         ).fetchall()
     )
     out: list[TranscriptLine] = []
@@ -240,7 +246,7 @@ async def transcript(
                 )
             )
             continue
-        who = "Tykee" if r["role"] == "assistant" else names.get(r["user_id"], "?")
+        who = "Tykee" if r["role"] == "assistant" else names.get(r["user_id"], "someone")
         text = "\n".join(b.get("text", "") for b in blocks if b.get("type") == "text")
         out.append(TranscriptLine(r["id"], r["created_at"], r["role"], who, r["thread_id"], text))
     return out
@@ -268,8 +274,10 @@ async def chat_state(db: Database, chat_id: int | None) -> sqlite3.Row | None:
 async def harvest_runs(db: Database, limit: int = 30) -> list[sqlite3.Row]:
     return await db.read(
         lambda c: c.execute(
-            "SELECT r.*, t.name AS topic FROM harvest_runs r LEFT JOIN forum_topics t "
-            "ON t.chat_id = r.chat_id AND t.thread_id = r.thread_id ORDER BY r.id DESC LIMIT ?",
+            "SELECT r.*, COALESCE(t.name, 'reader: ' || rc.label) AS topic FROM harvest_runs r "
+            "LEFT JOIN forum_topics t ON r.reader_chat_id IS NULL AND t.chat_id = r.chat_id "
+            "AND t.thread_id = r.thread_id LEFT JOIN reader_chats rc ON rc.id = r.reader_chat_id "
+            "ORDER BY r.id DESC LIMIT ?",
             (limit,),
         ).fetchall()
     )

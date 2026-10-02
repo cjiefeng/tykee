@@ -4,7 +4,7 @@
 <a class="crumb" href="/conversations">Conversations</a>
 <div class="page-head"><div><h1>{{ name }}</h1>
   <p class="lede">Last {{ lines | length }} rows, including tool calls.</p></div>
-  <a class="button" href="?limit={{ limit * 2 }}">Show more</a></div>
+  <a class="button" href="?limit={{ limit * 2 }}{% if source != 'bot' %}&source={{ source }}{% endif %}">Show more</a></div>
 <div class="transcript">
 {% for l in lines %}
 <div class="msg {{ l.role }}"><div class="meta">{{ local(l.created_at, '%d %b %H:%M') }}{% if l.thread_id %}, #{{ topic_names.get(l.thread_id, l.thread_id) }}{% endif %}</div>

@@ -50,9 +50,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Fail if memory, databases, models or secrets are tracked
+      - name: Fail if memory, databases, models, sessions or secrets are tracked
         run: |
-          bad="$(git ls-files | grep -E '(^|/)(data|vault)/|\.db(-wal|-shm)?$|\.onnx$|(^|/)models--|(^|/)\.env$' || true)"
+          bad="$(git ls-files | grep -E '(^|/)(data|vault)/|\.db(-wal|-shm)?$|\.onnx$|\.session(\.enc)?$|(^|/)models--|(^|/)\.env$' || true)"
           if [ -n "$bad" ]; then
             echo "These files must never be committed (§12):"
             echo "$bad"

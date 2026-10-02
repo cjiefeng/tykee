@@ -7,6 +7,7 @@ import logging
 import os
 import sqlite3
 import stat
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -45,6 +46,9 @@ from app.places.decide import SharedPlaces
 from app.places.recommend import RecommendService
 from app.places.resolver import PlaceResolver
 from app.places.service import PlaceService
+from app.reader.models import Reader
+from app.reader.service import Connect, ReaderService
+from app.reader.session import SessionKeyError, SessionVault
 from app.scheduler import Scheduler
 from app.settings import SettingsStore, seed_settings
 from app.telegram.adapter import TelegramAdapter
@@ -267,11 +271,25 @@ async def run(env: Env) -> None:
             tz=tz,
             health=health,
         )
+        reader = make_reader(
+            env,
+            db=db,
+            settings=settings,
+            users=users,
+            tz=tz,
+            gateway=gateway,
+            group_id=lambda: registry.group_id,
+            harvest=harvester.tick_reader,
+            places=places,
+            importer=importer,
+            health=health,
+        )
         scheduler = Scheduler(tz, health)
         scheduler.every_minute("harvest", harvester.tick)
         scheduler.every_minute("import", importer.tick)
         scheduler.every_minute("nudges", nudges.tick)
         scheduler.every_minute("backup", backups.tick)
+        scheduler.every_minute("reader", reader.tick)
         scheduler.every("embed_retry", store.retry_pending, minutes=60)
         scheduler.every("place_retry", places.retry_failed, minutes=60)
         scheduler.start()
@@ -305,6 +323,7 @@ async def run(env: Env) -> None:
                     nudges=nudges,
                     backups=backups,
                     places=places,
+                    reader=reader,
                 )
             )
             dashboard = make_server(dashboard_app, env.dashboard_host, env.dashboard_port)
@@ -328,10 +347,67 @@ async def run(env: Env) -> None:
             await ambient.close()
             await summarizer.close()
             await places.resolver.close()
+            await reader.close()
             embedder.close()
     finally:
         await bot.session.close()
         await db.close()
+
+
+def make_reader(
+    env: Env,
+    *,
+    db: Database,
+    settings: SettingsStore,
+    users: list[UserRecord],
+    tz: ZoneInfo,
+    gateway: AiogramGateway,
+    group_id: Callable[[], int | None],
+    harvest: Callable[[], Awaitable[object]],
+    places: PlaceService,
+    importer: ImportService,
+    health: HealthState,
+) -> ReaderService:
+    """§10.7. Without TG_API_ID/TG_API_HASH/READER_SESSION_KEY the service exists but stays off
+    (the dashboard explains what's missing). Telethon is only imported when configured."""
+    vault: SessionVault | None = None
+    connect: Connect | None = None
+    if env.reader_configured and env.tg_api_id is not None:
+        try:
+            vault = SessionVault(env.reader_session_path, env.reader_session_key)
+        except SessionKeyError as e:
+            log.error("account reader off", extra={"reason": str(e)})
+        else:
+            from app.reader.telethon_reader import open_reader
+
+            api_id, api_hash = env.tg_api_id, env.tg_api_hash
+
+            async def _connect(session: str) -> Reader:
+                reader: Reader = await open_reader(session, api_id, api_hash, db)
+                return reader
+
+            connect = _connect
+
+    admin = next((u for u in users if u.is_admin), None)
+
+    async def alert(text: str) -> None:
+        if admin is not None:
+            await gateway.send_text(admin.telegram_id, text)
+
+    return ReaderService(
+        db=db,
+        settings=settings,
+        users=users,
+        tz=tz,
+        vault=vault,
+        connect=connect,
+        alert=alert,
+        group_id=group_id,
+        harvest=harvest,
+        places=places,
+        importer=importer,
+        health=health,
+    )
 
 
 def main() -> None:

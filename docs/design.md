@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **Status** | Draft v1.33 (a 400 on web tools pauses them for an hour and shows the API's reason on the dashboard, §7.5) |
+| **Status** | Draft v1.35 (a 400 on web tools pauses them for an hour and shows the API's reason on the dashboard, §7.5). Earlier: v1.34 (reply escalation built: `/think` and phrases → Sonnet-tier, `/thinkharder` and "think even harder" → Opus-tier, §7.1); v1.33 (M10 as built: read-only account reader with resolve/log-out on the wrapper, first poll sets a starting point, immediate harvest after a poll, Backfill as a generated export into the import wizard, §10.7); v1.32 (share.google links resolve to places; `not_place` link status, §10.5) |
 | **Name** | Tykee: phonetic spelling of Tyche, the Greek goddess of chance. Telegram handle e.g. `@TykeeBot` (must end in "bot") |
 | **Author** | Jack |
 | **Date** | 2026-10-01 |
@@ -517,7 +517,7 @@ Identical ranks on every query (same two rank-2/rank-4 misses for both). **int8 
 
 | Component | API | Default tier | Section |
 |---|---|---|---|
-| Orchestrator (replies, tool use, memory proposals) | Messages API, tool use, prompt caching | Haiku-tier, escalates to Sonnet-tier | §7.1–7.4 |
+| Orchestrator (replies, tool use, memory proposals) | Messages API, tool use, prompt caching | Haiku-tier, escalates to Sonnet-tier or Opus-tier when asked | §7.1–7.4 |
 | Speak-or-stay-silent judge | Messages API, structured JSON output, prompt caching | Haiku-tier | §10.2 |
 | Chat history summaries | Messages API | Haiku-tier | §7.2 |
 | Bootstrap import: extraction | **Message Batches API** (async, discounted) | **Opus-tier** (one-off; quality sets the bot's day-one memory) | §15.3 |
@@ -537,10 +537,13 @@ Client rules:
 | Task | Default tier | Notes |
 |---|---|---|
 | Normal chat & decisions | Haiku-tier | Cheap, fast; most traffic. |
-| Complex / multi-constraint planning (e.g. "plan our Saturday") | Sonnet-tier | Escalated by keyword/length heuristic or a `/think` command. |
+| Complex / multi-constraint planning (e.g. "plan our Saturday") | Sonnet-tier (`models.escalated`) | `/think <question>`, a phrase in `escalation.think_phrases` ("think hard", "help us plan", …), or a message of at least `escalation.long_message_chars` (600; 0 = off). |
+| The big ones ("think even harder") | Opus-tier (`models.deep`) | `/thinkharder <question>`, or a phrase in `escalation.deep_phrases` ("think even harder", "think harder", …; checked before the think phrases, and also lifts a `/think`). |
 | History summarisation | Haiku-tier | Background. |
 
-Model IDs live in `settings` (`models.default`, `models.escalated`), never hardcoded.
+Model IDs live in `settings` (`models.default`, `models.escalated`, `models.deep`), never hardcoded; an empty `models.deep` falls back to `models.escalated`.
+
+**As built (v1.34):** `app/orchestrator/escalation.py` picks the tier in code (whole-phrase, case-insensitive match; no extra LLM call). Every call of that turn's tool loop uses the tier's model, `escalation.max_tokens` (1200) instead of `llm.max_tokens`, a 90 s timeout, and a line in the dynamic context asking for a fuller, weighed answer (randomness still comes only from `random_pick`). The commands always work; `escalation.enabled` switches the phrase and length triggers. Unprompted (ambient) replies always use the default tier, and so does everything once spend passes `budget.warn_ratio`, so asking for Opus can't run the budget out. No extended thinking yet: with tool use it would mean replaying thinking blocks inside the tool loop. Settings live on Behaviour.
 
 ### 7.2 Prompt assembly (in cache-friendly order)
 
@@ -628,7 +631,7 @@ Tykee can look things up online using the Claude API's built-in **web search** a
 **Implementation notes (M7):**
 - `app/orchestrator/web.py` holds the gate (`web_status`), the tool definitions built from settings (`web_tools`), and readers for the result blocks. A test fails if anything outside the orchestrator builds web tools.
 - **Gate, checked once per turn:** `web.enabled` (and `web.tool_versions` set) → today's searches (`SUM(usage.web_search_requests)` since local midnight) < `web.daily_search_cap` → daily and monthly spend both below `budget.warn_ratio` × cap. When the cap or budget closes the gate, the dynamic context tells Claude lookups are paused so it says it can't check live info. The web rules are appended to the cached rules block only when the tools are offered.
-- **Org-level disable:** a 400 on a request that carried web tools (e.g. web search turned off in the Console) is retried once without them instead of falling back to "offline" (`LLMBadRequest`). If that retry succeeds, the web tools were the problem (v1.33): the API's error message is kept in the health state, web tools are skipped for an hour (no paying for a rejected call on every turn; Claude gets the "paused" line), and the Behaviour page's Web section shows "Rejected by the API: <message>" so a Console setting doesn't silently turn into "I can't search the web".
+- **Org-level disable:** a 400 on a request that carried web tools (e.g. web search turned off in the Console) is retried once without them instead of falling back to "offline" (`LLMBadRequest`). If that retry succeeds, the web tools were the problem (v1.35): the API's error message is kept in the health state, web tools are skipped for an hour (no paying for a rejected call on every turn; Claude gets the "paused" line), and the Behaviour page's Web section shows "Rejected by the API: <message>" so a Console setting doesn't silently turn into "I can't search the web".
 - **Memory safety, enforced in code, not just the persona:** once a web search/fetch has run in a turn, `write_note` returns an error pointing to `propose_memory`, and every `propose_memory` in that turn goes to the inbox even with `memory.auto_approve`. `propose_memory` also takes an optional `source_url`; when given, the inbox source is `web:<url>` and review is forced in any turn.
 - **Echoing turns:** server tool blocks (`server_tool_use`, `web_search_tool_result`, `web_fetch_tool_result`) are sent back verbatim, since search results carry `encrypted_content` the API needs. `pause_turn` is resumed by re-sending the paused assistant turn (counts toward the 6-iteration limit). As with client tools, web results are not replayed in later turns' history.
 - **Sources:** if the final text has no link, up to two cited search results are appended as `[site](url)`, which the formatter turns into `<a>` links.
@@ -751,7 +754,7 @@ User taps ✅ → callback → status='accepted', pref update, log note appended
   Claude can override the default `for_users` when context is clear; the default only applies when ambiguous.
 - **Formatting:** `parse_mode=HTML`. Claude writes plain text with a minimal markdown subset (`**bold**`, `_italic_`, `[text](url)`); code escapes `<`, `>`, `&`, converts that subset to HTML and splits at 4096 chars on the plain text first, so tags are always balanced. Claude never emits HTML.
 - **Single poller:** exactly one replica; a second instance causes `409 Conflict` from `getUpdates`. Compose `deploy.replicas` not used; documented in runbook.
-- **Commands:** `/pick <category>`, `/options <category>`, `/remember <text>`, `/forget <text>`, `/think <question>`, `/quiet [duration]`, `/unquiet`, `/inbox` (admin, M3: review pending memories), `/settopic` (admin, M4: make this topic the answer topic, §10.4), `/help`. `/remember` and `/forget` are passed to Claude as ordinary messages; the rules tell it to use `write_note`.
+- **Commands:** `/pick <category>`, `/options <category>`, `/remember <text>`, `/forget <text>`, `/think <question>` (Sonnet-tier, §7.1), `/thinkharder <question>` (Opus-tier), `/quiet [duration]`, `/unquiet`, `/inbox` (admin, M3: review pending memories), `/settopic` (admin, M4: make this topic the answer topic, §10.4), `/help`. `/remember` and `/forget` are passed to Claude as ordinary messages; the rules tell it to use `write_note`.
 
 ### 10.1 Seeing all group messages
 
@@ -1335,6 +1338,8 @@ The page also shows, per chat: last fetch time, messages fetched today, last har
 
 **Chat id collision:** from Jack's account a DM's peer id is the other person's user id, which is also the `chat_id` of the *bot's* private chat with that person (e.g. Jocelyn). Rows are therefore separated by `messages.source`: conversation history, the judge, and DM replies only read `source='bot'`; the harvester reads `source='account_reader'` for reader chats. Every query touching `messages` by `chat_id` must also filter by `source` (enforced in the messages repository, with a test).
 
+As built (migration `0012_reader.sql`), the existing `ux_messages_tg` is recreated with `AND source = 'bot'`, and `reader_chats` also has `access_hash`, `baseline_msg_id`, `harvest_msg_id`, `fetch_day`/`fetched_today`, `last_harvest_at`/`last_harvest`, `error` and `created_at`; `reader_audit` has `detail`; `harvest_runs` gains `reader_chat_id`.
+
 ```sql
 ALTER TABLE messages ADD COLUMN source TEXT NOT NULL DEFAULT 'bot';   -- 'bot' | 'account_reader'
 CREATE UNIQUE INDEX ux_messages_reader ON messages(source, chat_id, tg_message_id)
@@ -1365,6 +1370,18 @@ CREATE TABLE reader_audit (
 );
 ```
 
+#### Implementation notes (M10, v1.33)
+
+- **Wrapper surface:** `app/reader/telethon_reader.py` is the only module importing Telethon. `ReadOnlyTelegramReader`'s public surface is `ALLOWED_OPERATIONS` = the three reads above plus `resolve` (a chat reference → id, type, title, member count; metadata only, needed to add a chat and apply the guard rails), `log_out` (Disconnect) and `close`. `fetch_new`/`backfill` re-check `reader.enabled` and the `reader_chats` row (enabled + consent) in the DB on every call. Tests: no other module imports Telethon, the public surface equals the allowlist (and no `send_*`/`edit_*`/`delete_*`/read-ack/`UpdateStatusRequest` appears in the module), refused chats never reach Telegram, the client has `receive_updates=False` and device model "Tykee reader (read-only)".
+- **Addressing:** peers are stored as Telethon "marked" ids (users > 0, basic groups `-id`, supergroups `-100…`, the same as Bot API chat ids) plus `access_hash`, so a restart needs no entity cache. Bots are refused too (besides the guard rails above); invite links are refused (the reader never joins).
+- **First poll:** starts from the newest message (`baseline_msg_id`) instead of reading the whole history; older history is what **Backfill** is for, and Backfill stops at the baseline so nothing is learned twice.
+- **Harvest right after a poll:** reader chats are harvester targets of their own (cursor `reader_chats.harvest_msg_id`, any new message is due, no `harvest.min_new_messages`), run immediately after a poll stored something (and on the normal harvester tick, for retries), so a decision shows up within one polling interval. The prompt says it's the couple's private chat (or a small group where others are context only). DM decisions are `for_users='both'`; observed reader decisions have `chat_id = NULL` (a DM peer id would collide with the bot's DM chat). Memory provenance is `reader:<label>/msg:<id>`. Observed decisions (reader chats and group topics alike) are also appended to the vault decision log (`logs/YYYY/MM/…`, "seen in <chat>"). `harvest_runs.reader_chat_id` ties runs to the chat; the reader page shows the last result.
+- **Backfill** fetches up to 6 months (max 20,000 messages) below the baseline, writes it as a single-chat Telegram Desktop export (`from_id = user<id>`, so the wizard maps senders) and hands it to `ImportService.receive`; the admin continues in Import with the same configure → cost preview → consent → review → apply steps.
+- **Remove** deletes all of the chat's raw rows (harvested ones too: without the `reader_chats` row the retention job couldn't find them later). **Retention** runs hourly: rows at or below the harvest cursor and older than `retention_days` (by message time) are deleted.
+- **Revoked** (any `401`-class error) or **Disconnect**: the client is dropped, the encrypted file deleted, `reader.enabled` set to false; revoked also marks chats `revoked`, sets the red health tile and DMs the admin. A new shell login is picked up on the next tick (file mtime), no restart. `FloodWaitError`s up to 60 s are slept through by Telethon; longer ones pause all polling until they expire.
+- **Audit actions** also include `rename`, `reader_on`/`reader_off`, `backfill` and `revoked`, with a free-text `detail`. Consent also DMs the admin.
+- **Conversations page** lists reader chats separately ("Reader: <label>", `?source=account_reader`).
+
 ---
 
 ## 11. Admin dashboard
@@ -1392,7 +1409,7 @@ All settings are read from SQLite on each request, so changes apply instantly wi
 - **Restart needed for:** user display names/timezones (users are loaded at startup) and `embedding.precision`.
 - **Budget:** tiles turn amber at `budget.warn_ratio` (0.8) and red at 100%. When a reply hits the cap, the admin gets one Telegram DM per household day (§14.4).
 - **Visual system (refreshed in M5):** one stylesheet (`static/app.css`) built on semantic tokens with light and dark values (follows the OS setting), system fonts (works offline), one accent colour, green/amber/red only for state and always with text. Sidebar navigation grouped Decisions / Memory / Admin at 1024px and wider, a scrolling nav strip below that; wide tables scroll inside their panel on phones. Skip link, visible focus rings, announced flash messages, 44px touch targets on touch screens, reduced motion respected. No emoji as icons.
-- **Not built in M4:** the `/think` escalation heuristic (§7.1) has no dashboard control because it doesn't exist yet; `models.escalated` is editable for when it does. Backups arrived in M6 (§14.2); the Import page arrived in M5 (§15.6).
+- **Not built in M4:** the `/think` escalation (§7.1), built in v1.34 with its settings on Behaviour. Backups arrived in M6 (§14.2); the Import page arrived in M5 (§15.6).
 
 ---
 
@@ -1762,7 +1779,7 @@ Deferred / later: voice notes (requires separate STT), photo input (fridge conte
 | Web access | Agent with Anthropic server-side web search/fetch, orchestrator only, capped, web-sourced memories need approval. Milestone M7, see §7.5. |
 | Import source | Telegram Desktop JSON export, uploaded via the dashboard Import wizard; chats chosen at upload time, see §15.1–15.2. |
 | Group behaviour | Group is primary; bot reads everything and decides when to speak, silent by default, see §10.2. |
-| Account reader | Tykee reads allowlisted chats (starting with the Jack ↔ Jocelyn DM) read-only as Jack (MTProto), records decisions and proposes memories; never posts as Jack; still replies only as the bot in the group. Allowlist managed in the dashboard; per-chat consent required. Milestone M10, see §10.7. |
+| Account reader | Tykee reads allowlisted chats (starting with the Jack ↔ Jocelyn DM) read-only as Jack (MTProto), records decisions and proposes memories; never posts as Jack; still replies only as the bot in the group. Allowlist managed in the dashboard; per-chat consent required. Milestone M10, see §10.7 (as built: implementation notes, v1.33). |
 | Place recommendations | Recommendations around an area with must-haves like pet-friendly, from known places + web discovery, with attribute provenance. **No Google Places API.** Milestone M9, see §10.6 (as built: implementation notes, v1.31). |
 | Google Maps links | Resolved in code (no API, no LLM) to a named place; recorded as a decision when you say you're going; only named businesses stored. Milestone M8, see §10.5. |
 | Group topics | Tykee reads and builds memory from **all** topics (except an optional ignore list) but only speaks in one **answer topic** (initially #Tykee), changeable from the dashboard. Enforced in code; milestone M4, see §10.4. |

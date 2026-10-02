@@ -127,6 +127,10 @@ immediately.
 | Backups tile amber/red | System page shows the last error. Disk full? `df -h /volume_nvme`. |
 | Maps links not recognised (Memory → Places shows `failed`) | The NAS needs outbound HTTPS to `maps.app.goo.gl`; check DNS/egress. Failed links get one retry after 6 h. `blocked_host` means Google redirected somewhere off the allowlist: expected for non-Maps links. |
 | "Eating here" + link gets no 👌 | Only in the answer topic, and only if the category from the message or the meal slot exists (Memory → Places → meal slots). Logs say `shared place: no category`. |
+| Account reader tile red "revoked" (admin got a DM) | The session was terminated from a phone, or Telegram logged it out. The reader turned itself off and deleted the saved file. Log in again: `docker exec -it tykee python -m app.reader.login`, then turn it on in System → Account reader. |
+| Reader "can't be decrypted" | `READER_SESSION_KEY` changed or was lost → set a key, log in again, remove the old "Tykee reader (read-only)" under Telegram → Settings → Devices. |
+| Reader chat status `flood_wait` | Telegram asked to slow down; polling pauses until it passes. Raise the chat's interval if it keeps happening. |
+| Reader chat status `not_found` | You left the chat or it was deleted → Remove it. |
 | Vault commit "has a remote" | Someone added a git remote to the vault → `git -C vault remote remove <name>`. Memory must never be pushed anywhere (§12). |
 
 ## Two-week unattended check (M6)
