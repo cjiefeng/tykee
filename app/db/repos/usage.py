@@ -19,13 +19,15 @@ class UsageRow:
     cache_write_tokens: int
     cost_usd: float
     created_at: str
+    web_search_requests: int = 0
+    web_fetch_requests: int = 0
 
 
 def insert(conn: sqlite3.Connection, row: UsageRow) -> None:
     conn.execute(
         "INSERT INTO usage(user_id, purpose, chat_id, import_job_id, model, input_tokens, "
-        "output_tokens, cache_read_tokens, cache_write_tokens, cost_usd, created_at) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "output_tokens, cache_read_tokens, cache_write_tokens, cost_usd, created_at, "
+        "web_search_requests, web_fetch_requests) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (
             row.user_id,
             row.purpose,
@@ -38,6 +40,8 @@ def insert(conn: sqlite3.Connection, row: UsageRow) -> None:
             row.cache_write_tokens,
             row.cost_usd,
             row.created_at,
+            row.web_search_requests,
+            row.web_fetch_requests,
         ),
     )
 
@@ -50,3 +54,12 @@ def cost_since(conn: sqlite3.Connection, since_sql: str, *, include_import: bool
         f"SELECT COALESCE(SUM(cost_usd), 0) FROM usage WHERE created_at >= ?{extra}", (since_sql,)
     ).fetchone()
     return float(total)
+
+
+def web_searches_since(conn: sqlite3.Connection, since_sql: str) -> int:
+    """Web searches billed since a time: the daily search cap (§7.5)."""
+    (total,) = conn.execute(
+        "SELECT COALESCE(SUM(web_search_requests), 0) FROM usage WHERE created_at >= ?",
+        (since_sql,),
+    ).fetchone()
+    return int(total)

@@ -241,7 +241,14 @@ async def test_tool_definitions_include_memory_tools(env: Env) -> None:
     stack = make_stack(env, llm)
     await _ask(stack, env, "hi")
     names = [t["name"] for t in llm.requests[0].tools]
-    assert names[-4:] == ["search_memory", "read_note", "write_note", "propose_memory"]
+    assert names[-6:] == [
+        "search_memory",
+        "read_note",
+        "write_note",
+        "propose_memory",
+        "web_search",
+        "web_fetch",
+    ]
 
 
 async def test_inbox_button_keeps_item_when_applying_fails(env: Env) -> None:

@@ -94,6 +94,7 @@ class ProposeMemoryIn(BaseModel):
     content: str = Field(min_length=1, max_length=1000)
     reason: str = Field(min_length=1, max_length=300)
     topic: str = Field(min_length=1, max_length=60)
+    source_url: str | None = Field(None, max_length=2000)
 
 
 # --- schemas ---------------------------------------------------------------------------------
@@ -329,6 +330,10 @@ def memory_tool_definitions(user_slugs: Sequence[str]) -> list[ToolParam]:
                         "type": "string",
                         "description": "Short note name to file it under, e.g. 'food', 'drinks'.",
                     },
+                    "source_url": {
+                        "type": "string",
+                        "description": "If the fact came from the web, the page URL.",
+                    },
                 },
                 "required": ["owner", "content", "reason", "topic"],
             },
@@ -348,6 +353,7 @@ class TurnContext:
     is_group: bool = False
     source: str = ""  # provenance for notes written this turn, e.g. telegram:<chat_id>
     last_picks: list[tuple[int, str]] = field(default_factory=list)  # (decision_id, name)
+    web_used: bool = False  # a web search/fetch ran this turn → memory writes need approval (§7.5)
 
 
 @dataclass(frozen=True)
@@ -571,6 +577,12 @@ class ToolRouter:
 
     async def _write_note(self, raw: dict[str, Any], ctx: TurnContext) -> ToolOutcome:
         assert self._m is not None
+        if ctx.web_used:
+            # §7.5: web content is untrusted; nothing reaches the vault without approval.
+            return _err(
+                "Web results were used this turn, so notes can't be written directly. "
+                "Use propose_memory (with source_url if it's a web fact); it goes to the inbox."
+            )
         a = WriteNoteIn.model_validate(raw)
         result = await self._m.write(
             a.path,
@@ -588,8 +600,14 @@ class ToolRouter:
     async def _propose_memory(self, raw: dict[str, Any], ctx: TurnContext) -> ToolOutcome:
         assert self._m is not None
         a = ProposeMemoryIn.model_validate(raw)
+        web = bool(a.source_url) or ctx.web_used
         item = await self._m.propose(
-            owner=a.owner, content=a.content, reason=a.reason, topic=a.topic, source=ctx.source
+            owner=a.owner,
+            content=a.content,
+            reason=a.reason,
+            topic=a.topic,
+            source=f"web:{a.source_url}" if a.source_url else ctx.source,
+            force_review=web,  # §7.5: web facts always wait for approval
         )
         return _ok(
             {
