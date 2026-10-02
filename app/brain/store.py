@@ -307,6 +307,15 @@ class NoteStore:
         log.info("vault reconciled", extra=stats)
         return stats
 
+    async def retry_pending(self) -> dict[str, int] | None:
+        """§14.4: re-embed chunks an embedding failure left 'pending' (scheduled hourly)."""
+        pending = await self._db.read(
+            lambda c: c.execute(
+                "SELECT COUNT(*) FROM chunks WHERE embed_model = ?", (index.PENDING,)
+            ).fetchone()[0]
+        )
+        return await self.reconcile() if pending else None
+
     async def rebuild(self) -> dict[str, int]:
         """System → Reindex (§14.4): drop the whole derived index and rebuild from files."""
         await self._db.write(index.drop_all)

@@ -186,6 +186,8 @@ textarea.tall { min-height: 26rem; }
 .row { display: grid; grid-template-columns: repeat(auto-fill, minmax(210px, 1fr)); gap: 0 var(--s4); }
 .form-panel { background: var(--surface); border: 1px solid var(--border); border-radius: var(--r-md); padding: var(--s2) var(--s4) var(--s4); box-shadow: var(--shadow); }
 .help { color: var(--text-3); font-size: 0.85rem; margin-top: var(--s2); }
+fieldset.days { border: 0; padding: 0; margin: var(--s3) 0 0; display: flex; flex-wrap: wrap; gap: var(--s2) var(--s4); }
+fieldset.days legend { padding: 0; margin-bottom: var(--s1); font-size: 0.85rem; font-weight: 550; color: var(--text-2); }
 
 /* --- buttons --------------------------------------------------------------------------------- */
 button, .button {

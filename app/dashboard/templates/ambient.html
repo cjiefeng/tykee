@@ -30,6 +30,38 @@
   <div class="actions"><button class="primary">Save</button></div>
 </form>
 
+<h2 id="nudges">Scheduled nudges</h2>
+<p class="help">At a set time Tykee starts the conversation with a pick, like "🎲 Dinner? I'm thinking <strong>Thai</strong>". No Claude call, so nudges cost nothing. A nudge is skipped when that category was already decided today or the group is muted. Group nudges go to the answer topic.</p>
+<form method="post" action="/nudges/settings" class="form-panel">{{ csrf_input }}
+  <label class="check"><input type="checkbox" name="nudges.enabled" {{ 'checked' if s.nudges_enabled }}> Scheduled nudges enabled</label>
+  <div class="row"><div><label for="n-grace">nudges.grace_min (catch-up window after a restart)</label><input id="n-grace" type="number" step="any" min="1" name="nudges.grace_min" value="{{ s.nudges_grace_min }}"></div></div>
+  <div class="actions"><button class="primary">Save</button></div>
+</form>
+<div class="table-wrap"><table><tr><th>Time</th><th>Days</th><th>Category</th><th>Target</th><th>State</th><th><span class="sr-only">Actions</span></th></tr>
+{% for n in s.nudges_items %}<tr><td>{{ n.time }}</td><td>{{ 'every day' if n.days | length == 7 else n.days | join(', ') }}</td><td>{{ n.category }}</td><td>{{ 'group' if n.target == 'group' else 'DM ' ~ n.target }}</td>
+<td><span class="pill {{ 'st-ok' if n.enabled else '' }}">{{ 'on' if n.enabled else 'paused' }}</span></td>
+<td><form method="post" action="/nudges/{{ n.id }}/toggle" class="inline">{{ csrf_input }}<button class="sm">{{ 'Pause' if n.enabled else 'Resume' }}</button></form>
+<form method="post" action="/nudges/{{ n.id }}/send" class="inline" onsubmit="return confirm('Send this nudge now? It counts as today\'s nudge.')">{{ csrf_input }}<button class="sm">Send now</button></form>
+<form method="post" action="/nudges/{{ n.id }}/delete" class="inline" onsubmit="return confirm('Delete this nudge?')">{{ csrf_input }}<button class="sm danger">Delete</button></form></td></tr>
+{% else %}<tr><td colspan="6">No nudges yet.</td></tr>{% endfor %}
+</table></div>
+<form method="post" action="/nudges/add" class="form-panel">{{ csrf_input }}
+  <h3>Add a nudge</h3>
+  <div class="row">
+    <div><label for="n-time">Time</label><input id="n-time" type="time" name="time" value="17:30" required></div>
+    <div><label for="n-cat">Category</label><select id="n-cat" name="category" required>{% for slug, name in nudge_categories %}<option value="{{ slug }}">{{ name }}</option>{% endfor %}</select></div>
+    <div><label for="n-target">Send to</label><select id="n-target" name="target">{% for t in nudge_targets %}<option value="{{ t }}">{{ 'the group' if t == 'group' else 'DM ' ~ t }}</option>{% endfor %}</select></div>
+  </div>
+  <fieldset class="days"><legend>Days</legend>{% for d in days %}<label class="check"><input type="checkbox" name="days" value="{{ d }}" {{ 'checked' if loop.index <= 5 }}> {{ d | capitalize }}</label>{% endfor %}</fieldset>
+  <div class="actions"><button class="primary" {{ 'disabled' if not nudge_categories }}>Add nudge</button>{% if not nudge_categories %}<span class="muted small">Create a category first.</span>{% endif %}</div>
+</form>
+<h3>Recent nudges</h3>
+<div class="table-wrap"><table><tr><th>When</th><th>Nudge</th><th>Status</th><th>Reason</th></tr>
+{% for r in nudge_runs %}<tr><td class="muted small">{{ local(r.created_at) }}</td><td>{{ r.nudge_id }}</td>
+<td><span class="pill {{ {'sent': 'st-ok', 'skipped': 'st-warn', 'failed': 'st-failed'}[r.status] }}">{{ r.status }}</span></td><td class="small">{{ r.reason or '' }}</td></tr>
+{% else %}<tr><td colspan="4">No nudges have run yet.</td></tr>{% endfor %}
+</table></div>
+
 <h2>Judge decisions</h2>
 <div class="table-wrap"><table><tr><th>When</th><th>Action</th><th>Rule</th><th>Confidence</th><th>Reason</th><th>Feedback</th></tr>
 {% for r in log %}<tr><td class="muted small">{{ local(r.created_at) }}</td>

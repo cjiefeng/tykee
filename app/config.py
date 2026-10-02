@@ -34,6 +34,11 @@ def parse_allowlist(raw: str) -> list[AllowedUser]:
     return users
 
 
+def dashboard_configured(password_hash: str, session_secret: str) -> bool:
+    """No default credentials (§11): both secrets, and a long enough session secret."""
+    return bool(password_hash) and len(session_secret) >= 32
+
+
 class Env(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore", env_ignore_empty=True)
 
@@ -69,6 +74,10 @@ class Env(BaseSettings):
     @property
     def allowlist(self) -> list[AllowedUser]:
         return parse_allowlist(self.allowed_telegram_ids)
+
+    @property
+    def dashboard_enabled(self) -> bool:
+        return dashboard_configured(self.dashboard_password_hash, self.session_secret)
 
     @property
     def db_path(self) -> Path:

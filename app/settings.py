@@ -11,7 +11,7 @@ import sqlite3
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from app.db.database import Database
 
@@ -42,6 +42,41 @@ class Models(BaseModel):
     def for_role(self, role: str) -> str:
         value = str(getattr(self, role))
         return value or (self.judge if role == "harvest" else value)
+
+
+DAYS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
+
+
+def _hhmm(value: str) -> str:
+    hh, sep, mm = value.strip().partition(":")
+    if not (sep and hh.isdigit() and mm.isdigit() and int(hh) < 24 and int(mm) < 60):
+        raise ValueError("time must be HH:MM (24h)")
+    return f"{int(hh):02d}:{int(mm):02d}"
+
+
+class Nudge(BaseModel):
+    """One scheduled nudge (§10.3): at ``time`` on ``days``, pick from ``category`` and post it
+    to ``target`` ('group' or a user slug for a DM)."""
+
+    id: str = Field(min_length=1, max_length=32, pattern=r"^[a-z0-9_-]+$")
+    time: str
+    days: list[str] = Field(min_length=1)
+    category: str = Field(min_length=1)
+    target: str = "group"
+    enabled: bool = True
+
+    @field_validator("time")
+    @classmethod
+    def _time(cls, value: str) -> str:
+        return _hhmm(value)
+
+    @field_validator("days")
+    @classmethod
+    def _days(cls, value: list[str]) -> list[str]:
+        days = {d.strip().lower()[:3] for d in value}
+        if not days <= set(DAYS):
+            raise ValueError(f"days must be among {', '.join(DAYS)}")
+        return [d for d in DAYS if d in days]
 
 
 class RuntimeSettings(BaseModel):
@@ -80,6 +115,25 @@ class RuntimeSettings(BaseModel):
     budget_warn_ratio: float = 0.8
     import_max_upload_mb: int = 200
     import_poll_min: float = 5.0
+    nudges_enabled: bool = False
+    nudges_grace_min: float = 30.0
+    nudges_items: list[Nudge] = Field(default_factory=list)
+    backup_enabled: bool = True
+    backup_time: str = "03:00"
+    backup_keep: int = Field(14, ge=1)
+
+    @field_validator("backup_time")
+    @classmethod
+    def _backup_time(cls, value: str) -> str:
+        return _hhmm(value)
+
+    @field_validator("nudges_items")
+    @classmethod
+    def _unique_nudge_ids(cls, value: list[Nudge]) -> list[Nudge]:
+        ids = [n.id for n in value]
+        if len(ids) != len(set(ids)):
+            raise ValueError("nudge ids must be unique")
+        return value
 
     def model_for(self, role: ModelRole) -> str:
         return self.models.for_role(role)

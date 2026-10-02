@@ -24,6 +24,8 @@ jobs:
       UV_LINK_MODE: copy
       UV_FROZEN: "1"
     steps:
+      - name: Install git (vault backup tests, §14.2)
+        run: apt-get update -qq && apt-get install -y -qq --no-install-recommends git
       - uses: actions/checkout@v4
       - name: Install dependencies
         run: uv sync

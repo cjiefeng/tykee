@@ -28,6 +28,7 @@ from fastapi.templating import Jinja2Templates
 from markupsafe import Markup, escape
 
 from app.ambient.service import AmbientService
+from app.backup import BackupService
 from app.brain.memory import MemoryService
 from app.brain.store import NoteStore
 from app.db.database import Database
@@ -36,6 +37,7 @@ from app.decisions.service import DecisionService
 from app.harvest import Harvester
 from app.health import HealthState
 from app.importer.service import ImportService
+from app.nudges import NudgeService
 from app.settings import SettingsStore
 from app.telegram.gateway import ChatGateway
 from app.telegram.topics import TopicService
@@ -83,6 +85,8 @@ class DashboardDeps:
     harvester: Harvester | None = None
     ambient: AmbientService | None = None
     importer: ImportService | None = None
+    nudges: NudgeService | None = None
+    backups: BackupService | None = None
     embed_model: str = ""
     _failures: dict[str, tuple[int, float]] = field(default_factory=dict)
 

@@ -5,7 +5,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Form, Request
 from fastapi.responses import HTMLResponse, Response
 
-from app.dashboard import queries
+from app.dashboard import queries, views_ops
 from app.dashboard.core import DashboardDeps, back, render
 from app.llm.client import budget_status
 from app.telegram.topics import send_thread
@@ -42,6 +42,8 @@ def register(router: APIRouter, deps: DashboardDeps) -> None:
             db_bytes=queries.db_size(deps.db_path),
             embed_model=deps.embed_model,
             warn=s.budget_warn_ratio,
+            backup_enabled=s.backup_enabled,
+            **views_ops.backup_context(deps),
         )
 
     # --- users & telegram (§10.4) ------------------------------------------------------------
@@ -136,6 +138,7 @@ def register(router: APIRouter, deps: DashboardDeps) -> None:
     @router.get("/system", response_class=HTMLResponse)
     async def system(request: Request) -> Response:
         counts = await queries.counts(deps.db, utcnow(), deps.tz)
+        s = await deps.settings.load()
         return render(
             request,
             deps,
@@ -147,6 +150,8 @@ def register(router: APIRouter, deps: DashboardDeps) -> None:
             embed_model=deps.embed_model,
             health=deps.health,
             logs=deps.log_lines()[-200:],
+            s=s,
+            **views_ops.backup_context(deps),
         )
 
     @router.get("/system/logs", response_class=HTMLResponse)

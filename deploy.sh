@@ -14,6 +14,7 @@ cd "$SCRIPT_DIR"
 
 BRANCH="${1:-}"
 STARTUP_TIMEOUT_S=60
+HEALTH_TIMEOUT_S=120   # the first healthcheck runs one interval (60s) after start
 
 fail() { echo "❌ $*" >&2; exit 1; }
 step() { echo; echo "[$1/5] $2"; }
@@ -95,6 +96,20 @@ grep -q '"msg": "polling"' <<<"$LOGS" || {
   echo "$LOGS" | tail -20
   fail "bot did not report 'polling' within ${STARTUP_TIMEOUT_S}s"
 }
+
+echo "    waiting for the container healthcheck (up to ${HEALTH_TIMEOUT_S}s)"
+HEALTH=""
+for _ in $(seq $((HEALTH_TIMEOUT_S / 2))); do
+  HEALTH="$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{end}}' tykee 2>/dev/null || true)"
+  [[ "$HEALTH" == "healthy" || "$HEALTH" == "unhealthy" || -z "$HEALTH" ]] && break
+  sleep 2
+done
+case "$HEALTH" in
+  healthy)   echo "    ✅ healthy" ;;
+  unhealthy) echo "    ⚠️  unhealthy: see docs/runbook.md (Troubleshooting); rollback: ./deploy.sh $PREV" ;;
+  "")        echo "    (no healthcheck configured)" ;;
+  *)         echo "    ⚠️  still '$HEALTH' after ${HEALTH_TIMEOUT_S}s; check later with: ${DC[*]} ps" ;;
+esac
 
 "${DC[@]}" ps
 docker image prune -f >/dev/null 2>&1 || true   # drop dangling images left by rebuilds
