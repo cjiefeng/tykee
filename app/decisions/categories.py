@@ -188,3 +188,66 @@ def match_in_text(conn: sqlite3.Connection, text: str) -> Category | None:
         if contains_phrase(haystack, needle) and (best is None or len(needle) > best[0]):
             best = (len(needle), r["cid"])
     return get_by_id(conn, best[1]) if best else None
+
+
+# --- dashboard admin (§8.1 sprawl control, §11) ------------------------------------------------
+
+
+def merge(conn: sqlite3.Connection, src_id: int, dst_id: int) -> None:
+    """Merge category ``src`` into ``dst``: options, decisions and aliases move over, the source
+    slug becomes an alias, and ``merged_into`` is set so old references keep resolving.
+    Options with the same name are folded into the destination's option."""
+    if src_id == dst_id:
+        raise ValueError("can't merge a category into itself")
+    src = conn.execute(
+        "SELECT slug, merged_into FROM categories WHERE id = ?", (src_id,)
+    ).fetchone()
+    dst = get_by_id(conn, dst_id)
+    if src is None or dst is None:
+        raise ValueError("unknown category")
+    if src["merged_into"] is not None:
+        raise ValueError("that category was already merged into another one")
+    # ``dst`` follows merged_into, so it can resolve back to ``src`` (e.g. a stale page merging
+    # A into B after B was merged into A). Merging into itself would delete every option.
+    if dst.id == src_id:
+        raise ValueError("can't merge a category into itself")
+    dst_opts = {
+        r["name"].casefold(): r["id"]
+        for r in conn.execute("SELECT id, name FROM options WHERE category_id = ?", (dst.id,))
+    }
+    for opt in conn.execute(
+        "SELECT id, name FROM options WHERE category_id = ?", (src_id,)
+    ).fetchall():
+        same = dst_opts.get(opt["name"].casefold())
+        if same is None:
+            conn.execute("UPDATE options SET category_id = ? WHERE id = ?", (dst.id, opt["id"]))
+            continue
+        conn.execute("UPDATE decisions SET option_id = ? WHERE option_id = ?", (same, opt["id"]))
+        conn.execute("DELETE FROM option_prefs WHERE option_id = ?", (opt["id"],))
+        conn.execute("DELETE FROM options WHERE id = ?", (opt["id"],))
+    conn.execute("UPDATE decisions SET category_id = ? WHERE category_id = ?", (dst.id, src_id))
+    conn.execute(
+        "UPDATE category_aliases SET category_id = ? WHERE category_id = ?", (dst.id, src_id)
+    )
+    add_alias(conn, src["slug"], dst.id)
+    conn.execute("UPDATE categories SET merged_into = ? WHERE id = ?", (dst.id, src_id))
+    log.info("categories merged", extra={"src": src_id, "dst": dst.id})
+
+
+def rename(conn: sqlite3.Connection, category_id: int, *, slug: str, display_name: str) -> None:
+    """Change slug and/or display name; the old slug stays as an alias."""
+    cat = get_by_id(conn, category_id)
+    if cat is None:
+        raise ValueError("unknown category")
+    new_slug = slugify(slug) or cat.slug
+    if new_slug != cat.slug:
+        taken = conn.execute(
+            "SELECT 1 FROM categories WHERE slug = ? AND id != ?", (new_slug, cat.id)
+        ).fetchone()
+        if taken:
+            raise ValueError(f"slug {new_slug!r} is already used")
+        add_alias(conn, cat.slug, cat.id)
+    conn.execute(
+        "UPDATE categories SET slug = ?, display_name = ? WHERE id = ?",
+        (new_slug, display_name.strip() or cat.display_name, cat.id),
+    )

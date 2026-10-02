@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}Tykee{% endblock %} · Tykee</title>
+  <link rel="stylesheet" href="/static/app.css">
+  <script src="/static/htmx.min.js" defer></script>
+</head>
+<body hx-headers='{"X-CSRF-Token": "{{ csrf }}"}'>
+{% if not bare %}
+<header>
+  <span class="brand">🎲 Tykee</span>
+  <nav>
+    {% for href, label in [("/", "Overview"), ("/behaviour", "Behaviour"), ("/categories", "Categories"),
+                           ("/memory", "Memory"), ("/ambient", "Ambient"), ("/conversations", "Conversations"),
+                           ("/users", "Users"), ("/import", "Import"), ("/system", "System"), ("/settings", "Settings")] %}
+      <a href="{{ href }}" class="{{ 'on' if (nav == href or (href != '/' and nav.startswith(href))) }}">{{ label }}</a>
+    {% endfor %}
+  </nav>
+  <form method="post" action="/logout" class="inline">{{ csrf_input }}<button>Log out</button></form>
+</header>
+{% endif %}
+<main>
+  {% for kind, text in flashes %}<div class="flash {{ kind }}">{{ text }}</div>{% endfor %}
+  {% block content %}{% endblock %}
+</main>
+</body>
+</html>

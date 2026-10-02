@@ -41,6 +41,11 @@ class Env(BaseSettings):
     anthropic_api_key: str = ""  # empty -> fallback mode (§7.0)
     allowed_telegram_ids: str
     group_chat_id: int | None = None  # see design §10: seeds the one allowed group
+    group_topic_id: int | None = None  # §10.4: seeds telegram.answer_topic_id on first run
+    dashboard_password_hash: str = ""  # argon2id; empty → dashboard login disabled
+    session_secret: str = ""
+    dashboard_host: str = "0.0.0.0"
+    dashboard_port: int = 8080
     data_dir: Path = Path("/data")
     embed_baked_dir: Path = Path("/app/models")  # model files baked into the image at build
     log_level: str = "INFO"

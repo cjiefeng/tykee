@@ -24,13 +24,14 @@ from anthropic.types import (
 
 from app.db.database import Database
 from app.db.repos import usage as usage_repo
+from app.health import HealthState
 from app.llm.pricing import cost_usd
 from app.settings import ModelRole, RuntimeSettings, SettingsStore
 from app.timeutil import local_day_start, local_month_start, to_sql, utcnow
 
 log = logging.getLogger(__name__)
 
-Purpose = Literal["chat", "judge", "summary", "import_extract", "import_consolidate"]
+Purpose = Literal["chat", "judge", "summary", "import_extract", "import_consolidate", "harvest"]
 
 INTERACTIVE_TIMEOUT_S = 30.0
 CONSOLIDATION_TIMEOUT_S = 120.0
@@ -124,7 +125,9 @@ class AnthropicLLMClient:
         settings: SettingsStore,
         tz: ZoneInfo,
         http_client: anthropic.DefaultAsyncHttpxClient | None = None,
+        health: HealthState | None = None,
     ) -> None:
+        self._health = health
         self._db = db
         self._settings = settings
         self._tz = tz
@@ -138,6 +141,10 @@ class AnthropicLLMClient:
     @property
     def configured(self) -> bool:
         return self._client is not None and not self.auth_failed
+
+    def _record(self, *, ok: bool) -> None:
+        if self._health is not None:
+            self._health.llm_result(ok)
 
     async def complete(self, req: LLMRequest) -> LLMResponse:
         if self._client is None or self.auth_failed:
@@ -162,16 +169,19 @@ class AnthropicLLMClient:
                 ),
             )
         except anthropic.AuthenticationError as e:
+            self._record(ok=False)
             self.auth_failed = True
             log.error("anthropic auth failed; switching to fallback mode")
             raise LLMUnavailable("API key rejected") from e
         except anthropic.APIError as e:
+            self._record(ok=False)
             log.warning(
                 "anthropic call failed",
                 extra={"purpose": req.purpose, "model": model, "error": type(e).__name__},
             )
             raise LLMUnavailable(type(e).__name__) from e
 
+        self._record(ok=True)
         u = message.usage
         cache_read = u.cache_read_input_tokens or 0
         cache_write = u.cache_creation_input_tokens or 0

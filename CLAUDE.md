@@ -54,6 +54,17 @@ All tooling runs inside Docker (no local Python/uv needed).
   `retrieval.py` (hybrid BM25 + KNN + RRF, owner-filtered), `embedder.py` (fastembed e5-small,
   int8 by default, own thread), `memory.py` (`MemoryService`: scopes, write policy, inbox,
   pinned block, avoid_tags, decision log). Vault lives at `/data/vault`.
+- `app/telegram/topics.py`: forum topics (§10.4): read every topic, answer only in the answer
+  topic; `thread_of()` (General = 1) / `send_thread()` (General → no thread id).
+- `app/harvest.py` + `app/scheduler.py`: memory harvester for non-answer topics (code-only tick
+  every minute, Haiku extraction only when a topic has new chat); `app/extraction/schema.py` is
+  shared with the M5 import; `app/inbox_appliers.py` applies approved category/option suggestions.
+- `app/dashboard/`: FastAPI + Jinja2 + vendored HTMX (§11), served by uvicorn inside the bot's
+  event loop. `core.py` (LAN-only, argon2 login + lockout, sessions, CSRF, `render()`),
+  `queries.py` (all dashboard SQL + validated `save_settings`), `views_*.py` per page,
+  `templates/`, `static/` (see `static/VENDORED.md`). `python -m app.dashboard.hashpw` makes the
+  password hash + session secret.
+- `app/health.py`: in-process health signals for the dashboard tiles.
 - `app/ambient/`: speak-or-stay-silent (§10.2). `rules.py` (pure stage-1), `debounce.py`
   (per-chat timers, in memory), `judge.py` (structured-output call), `state.py`
   (`chat_state`/`ambient_log`), `phrases.py` (mute/negative cues, `/quiet` durations),
@@ -79,6 +90,13 @@ All tooling runs inside Docker (no local Python/uv needed).
   `app/telegram/formatting.py` escapes and converts. Never send unescaped model text as HTML.
 - History replay sends only user text and final assistant text; tool calls are stored for
   debugging, not replayed. Fallback replies are not stored in history.
+- Dashboard: every POST needs the session's CSRF token (forms: `{{ csrf_input }}`; HTMX: the
+  `X-CSRF-Token` header set on `<body>`). Settings writes go through `queries.save_settings`, which
+  validates the whole set first. Store new session values by assignment (Starlette only re-sends
+  the cookie when the session dict itself changes). Tests drive the app with
+  `httpx.ASGITransport(app, client=(ip, port))`.
+- Group sends go to the answer topic: pass `thread=` to `TelegramAdapter._send`; never send to
+  the group without it.
 - Vault writes only through `NoteStore` (or `MemoryService` for Claude-facing policy). Never write
   files under `/data/vault` directly; FTS5 deletes need the old text and vec0 rows aren't
   cascaded, both handled in `brain/index.py`.

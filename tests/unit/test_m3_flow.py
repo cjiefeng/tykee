@@ -8,7 +8,7 @@ from collections import Counter
 from aiogram.types import CallbackQuery
 
 from app.settings import set_value
-from app.telegram.keyboards import callback_data
+from app.telegram.keyboards import callback_data, inbox_keyboard
 from tests.conftest import (
     BOT,
     GROUP_ID,
@@ -242,3 +242,20 @@ async def test_tool_definitions_include_memory_tools(env: Env) -> None:
     await _ask(stack, env, "hi")
     names = [t["name"] for t in llm.requests[0].tools]
     assert names[-4:] == ["search_memory", "read_note", "write_note", "propose_memory"]
+
+
+async def test_inbox_button_keeps_item_when_applying_fails(env: Env) -> None:
+    stack = make_stack(env)
+
+    async def broken(item: object) -> None:
+        raise RuntimeError("boom")
+
+    stack.memory.appliers["category"] = broken
+    item = await stack.memory.suggest(
+        kind="category", content="c", reason="r", source="s", payload={"phrase": "x"}
+    )
+    stack.gateway.keyboards[77] = inbox_keyboard(item.id)
+    await stack.adapter.handle_inbox_callback(_cb(f"m:{item.id}:a", 77), env.jack)
+    assert stack.gateway.toasts[-1].startswith("Couldn't apply")
+    assert stack.gateway.keyboards[77] is not None  # buttons stay for a retry
+    assert [i.id for i in await stack.memory.pending()] == [item.id]

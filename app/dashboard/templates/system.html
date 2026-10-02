@@ -1,0 +1,17 @@
+{% extends "base.html" %}
+{% block title %}System{% endblock %}
+{% block content %}
+<h1>System</h1>
+<div class="grid">
+  <div class="card"><h3>Database</h3><div>{{ (db_bytes / 1048576) | round(2) }} MB</div><div class="muted small">{{ db_path }}</div></div>
+  <div class="card"><h3>Vault</h3><div>{{ counts.notes }} notes · {{ counts.chunks }} chunks · {{ counts.links }} links</div><div class="muted small">{{ vault }}</div></div>
+  <div class="card"><h3>Embeddings</h3><div>{{ embed_model }}</div><div class="small {{ 'warn' if counts.pending_chunks else 'muted' }}">{{ counts.pending_chunks }} pending</div></div>
+  <div class="card"><h3>Process</h3><div>up since {{ local(health.started_at) }}</div></div>
+</div>
+<h2>Maintenance</h2>
+<form method="post" action="/system/reindex" class="actions" onsubmit="return confirm('Drop and rebuild the search index from the vault files?')">{{ csrf_input }}
+  <button>Reindex vault</button><span class="muted small">Rebuilds the derived index; notes themselves aren't touched.</span></form>
+<p class="muted small">Backups (nightly DB copy + vault commit) arrive in M6.</p>
+<h2>Logs <span class="muted small">(last 200 lines)</span></h2>
+<div hx-get="/system/logs" hx-trigger="every 5s" hx-swap="innerHTML">{% include "_logs.html" %}</div>
+{% endblock %}

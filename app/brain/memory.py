@@ -4,12 +4,13 @@ write policies, and owns the memory inbox."""
 
 from __future__ import annotations
 
+import json
 import logging
 import sqlite3
-from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from collections.abc import Awaitable, Callable, Sequence
+from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Literal
+from typing import Any, Literal
 
 from app.brain import notes as nt
 from app.brain.notes import Note, PathError
@@ -29,6 +30,9 @@ class MemoryPolicyError(ValueError):
     """A memory operation that isn't allowed or can't be done; message is safe to show Claude."""
 
 
+InboxKind = Literal["note", "category", "option"]
+
+
 @dataclass(frozen=True)
 class InboxItem:
     id: int
@@ -39,13 +43,28 @@ class InboxItem:
     source: str | None
     status: str
     created_at: str
+    kind: str = "note"
+    payload: dict[str, Any] = field(default_factory=dict)
 
 
 def _inbox_row(r: sqlite3.Row) -> InboxItem:
     return InboxItem(
-        r["id"], r["owner"], r["target_path"], r["content"], r["reason"], r["source"],
-        r["status"], r["created_at"],
-    )  # fmt: skip
+        r["id"],
+        r["owner"],
+        r["target_path"],
+        r["content"],
+        r["reason"],
+        r["source"],
+        r["status"],
+        r["created_at"],
+        r["kind"],
+        json.loads(r["payload_json"]) if r["payload_json"] else {},
+    )
+
+
+# Applies an approved non-note suggestion (e.g. creates the category). Registered by the app so
+# the memory layer doesn't depend on the decision engine.
+Applier = Callable[[InboxItem], Awaitable[None]]
 
 
 class MemoryService:
@@ -66,6 +85,7 @@ class MemoryService:
         self._users = list(users)
         self._slugs = [u.slug for u in users]
         self._clock = clock
+        self.appliers: dict[str, Applier] = {}
 
     # --- owners ------------------------------------------------------------------------------
 
@@ -208,6 +228,31 @@ class MemoryService:
         assert item is not None
         return item
 
+    async def suggest(
+        self, *, kind: InboxKind, content: str, reason: str, source: str, payload: dict[str, Any]
+    ) -> InboxItem:
+        """Queue a non-note suggestion (§10.4 harvester): a category or option to review."""
+        now = to_sql(self._clock())
+
+        def _ins(c: sqlite3.Connection) -> int:
+            cur = c.execute(
+                "INSERT INTO memory_inbox(owner, target_path, content, reason, source, created_at, "
+                "kind, payload_json) VALUES ('shared', '', ?, ?, ?, ?, ?, ?)",
+                (
+                    content.strip(),
+                    reason.strip(),
+                    source,
+                    now,
+                    kind,
+                    json.dumps(payload, ensure_ascii=False),
+                ),
+            )
+            return int(cur.lastrowid or 0)
+
+        item = await self.get(await self._db.write(_ins))
+        assert item is not None
+        return item
+
     async def get(self, item_id: int) -> InboxItem | None:
         r = await self._db.read(
             lambda c: c.execute("SELECT * FROM memory_inbox WHERE id = ?", (item_id,)).fetchone()
@@ -232,7 +277,10 @@ class MemoryService:
         return int(row[0])
 
     async def decide(self, item_id: int, *, approve: bool, user_id: int | None) -> InboxItem:
-        """Approve (append to the target note) or reject. Only a pending item can change."""
+        """Approve (append to the target note, or apply the suggestion) or reject. Only a pending
+        item can change. The status flips first, so two approvals racing (Telegram button and
+        dashboard) apply it once; if applying fails, the item goes back to pending and the error
+        propagates, so nothing is silently lost."""
         now = to_sql(self._clock())
         status = "approved" if approve else "rejected"
         changed = await self._db.write(
@@ -247,17 +295,38 @@ class MemoryService:
         item = await self.get(item_id)
         if item is None:
             raise MemoryPolicyError(f"no inbox item {item_id}")
-        if changed and approve:
-            exists = await self.store.exists(item.target_path)
-            topic = item.target_path.rsplit("/", 1)[-1][:-3].replace("-", " ")
-            await self.store.write(
-                item.target_path,
-                mode="append" if exists else "create",
-                content=f"- {item.content}",
-                title=topic[:1].upper() + topic[1:],
-                source=item.source or f"inbox:{item.id}",
+        if not (changed and approve):
+            return item
+        try:
+            await self._apply(item)
+        except Exception:
+            log.exception("applying inbox item failed", extra={"inbox_id": item.id})
+            await self._db.write(
+                lambda c: c.execute(
+                    "UPDATE memory_inbox SET status = 'pending', decided_at = NULL, "
+                    "decided_by = NULL WHERE id = ?",
+                    (item_id,),
+                )
             )
+            raise
         return item
+
+    async def _apply(self, item: InboxItem) -> None:
+        if item.kind != "note":
+            applier = self.appliers.get(item.kind)
+            if applier is None:
+                raise MemoryPolicyError(f"don't know how to apply a {item.kind!r} suggestion")
+            await applier(item)
+            return
+        exists = await self.store.exists(item.target_path)
+        topic = item.target_path.rsplit("/", 1)[-1][:-3].replace("-", " ")
+        await self.store.write(
+            item.target_path,
+            mode="append" if exists else "create",
+            content=f"- {item.content}",
+            title=topic[:1].upper() + topic[1:],
+            source=item.source or f"inbox:{item.id}",
+        )
 
     # --- decision log (§8.4) -----------------------------------------------------------------
 

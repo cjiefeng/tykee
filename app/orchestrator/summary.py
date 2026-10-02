@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from zoneinfo import ZoneInfo
 
 from app.db.database import Database
@@ -37,7 +37,9 @@ class Summarizer:
         llm: LLMClient,
         users: Sequence[UserRecord],
         tz: ZoneInfo,
+        history_thread: Callable[[int], Awaitable[int | None]] | None = None,
     ) -> None:
+        self._history_thread = history_thread
         self._db = db
         self._settings = settings
         self._llm = llm
@@ -55,7 +57,10 @@ class Summarizer:
         s = await self._settings.load()
         current = await self._db.read(lambda c: summaries_repo.get(c, chat_id))
         upto = current.upto_msg_id if current else 0
-        rows = await self._db.read(lambda c: messages_repo.after(c, chat_id, upto))
+        thread = await self._history_thread(chat_id) if self._history_thread else None
+        rows = await self._db.read(
+            lambda c: messages_repo.after(c, chat_id, upto, only_thread=thread)
+        )
         overflow = rows[: max(len(rows) - s.history_max_turns, 0)]
         if len(overflow) < s.summary_batch:
             return

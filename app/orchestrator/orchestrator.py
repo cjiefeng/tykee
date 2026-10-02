@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import logging
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -44,6 +44,7 @@ FALLBACK_EMPTY = "🤔"
 class ChatContext:
     chat_id: int
     is_group: bool
+    thread: int | None = None  # history filter: the answer topic in a forum group (§10.4)
 
 
 @dataclass(frozen=True)
@@ -51,6 +52,7 @@ class Reply:
     text: str
     from_llm: bool  # False for fallback text, which is not stored in history
     picks: list[tuple[int, str]] = field(default_factory=list)  # (decision_id, name) → buttons
+    budget_exhausted: bool = False  # §14.4: the adapter DMs the admin once a day
 
 
 def assistant_blocks(content: Sequence[ContentBlock]) -> list[ContentBlockParam]:
@@ -119,7 +121,9 @@ class Orchestrator:
     ) -> Reply:
         s = await self._settings.load()
         rows = await self._db.read(
-            lambda conn: messages_repo.recent(conn, chat.chat_id, s.history_max_turns)
+            lambda conn: messages_repo.recent(
+                conn, chat.chat_id, s.history_max_turns, only_thread=chat.thread
+            )
         )
         summary = await self._db.read(lambda conn: summaries_repo.get(conn, chat.chat_id))
         messages: list[MessageParam] = build_messages(
@@ -155,7 +159,8 @@ class Orchestrator:
             resp = await self._loop(system, messages, ctx)
         except BudgetExceeded as e:
             log.warning("budget exhausted", extra={"period": e.period})
-            return await self._fallback(FALLBACK_BUDGET, chat, actor, text, ctx)
+            reply = await self._fallback(FALLBACK_BUDGET, chat, actor, text, ctx)
+            return replace(reply, budget_exhausted=True)
         except LLMError:
             return await self._fallback(FALLBACK_OFFLINE, chat, actor, text, ctx)
 

@@ -21,6 +21,7 @@ class StoredMessage:
     kind: Kind
     text: str
     created_at: str
+    thread_id: int | None = None
 
 
 def text_content(text: str) -> str:
@@ -41,27 +42,36 @@ def insert(
     role: Role,
     kind: Kind,
     content: str,
+    thread_id: int | None = None,
 ) -> int | None:
     """Returns the new row id, or None if this Telegram message was already stored."""
     cur = conn.execute(
-        "INSERT OR IGNORE INTO messages(chat_id, tg_message_id, user_id, role, kind, content) "
-        "VALUES (?, ?, ?, ?, ?, ?)",
-        (chat_id, tg_message_id, user_id, role, kind, content),
+        "INSERT OR IGNORE INTO messages(chat_id, tg_message_id, user_id, role, kind, content, "
+        "thread_id) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (chat_id, tg_message_id, user_id, role, kind, content, thread_id),
     )
     return cur.lastrowid if cur.rowcount else None
 
 
-def recent(conn: sqlite3.Connection, chat_id: int, limit: int) -> list[StoredMessage]:
-    """Last ``limit`` user/assistant rows for a chat, oldest first (tool rows are not replayed)."""
+def _thread_clause(only_thread: int | None) -> tuple[str, tuple[int, ...]]:
+    return ("AND thread_id = ? ", (only_thread,)) if only_thread is not None else ("", ())
+
+
+def recent(
+    conn: sqlite3.Connection, chat_id: int, limit: int, only_thread: int | None = None
+) -> list[StoredMessage]:
+    """Last ``limit`` user/assistant rows for a chat, oldest first (tool rows are not replayed).
+    ``only_thread`` limits a forum group to one topic (§10.4: the answer topic)."""
+    clause, args = _thread_clause(only_thread)
     rows = conn.execute(
         "SELECT * FROM messages WHERE chat_id = ? AND role IN ('user', 'assistant') "
-        "ORDER BY id DESC LIMIT ?",
-        (chat_id, limit),
+        f"{clause}ORDER BY id DESC LIMIT ?",
+        (chat_id, *args, limit),
     ).fetchall()
-    return [_row(r) for r in reversed(rows)]
+    return [from_row(r) for r in reversed(rows)]
 
 
-def _row(r: sqlite3.Row) -> StoredMessage:
+def from_row(r: sqlite3.Row) -> StoredMessage:
     return StoredMessage(
         id=r["id"],
         chat_id=r["chat_id"],
@@ -71,14 +81,18 @@ def _row(r: sqlite3.Row) -> StoredMessage:
         kind=r["kind"],
         text=_text_of(r["content"]),
         created_at=r["created_at"],
+        thread_id=r["thread_id"],
     )
 
 
-def after(conn: sqlite3.Connection, chat_id: int, after_id: int) -> list[StoredMessage]:
+def after(
+    conn: sqlite3.Connection, chat_id: int, after_id: int, only_thread: int | None = None
+) -> list[StoredMessage]:
     """User/assistant rows with id > ``after_id``, oldest first (for summarisation)."""
+    clause, args = _thread_clause(only_thread)
     rows = conn.execute(
         "SELECT * FROM messages WHERE chat_id = ? AND id > ? AND role IN ('user', 'assistant') "
-        "ORDER BY id",
-        (chat_id, after_id),
+        f"{clause}ORDER BY id",
+        (chat_id, after_id, *args),
     ).fetchall()
-    return [_row(r) for r in rows]
+    return [from_row(r) for r in rows]

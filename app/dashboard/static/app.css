@@ -1,0 +1,51 @@
+:root { --bg:#fafaf8; --fg:#1d1d1b; --muted:#6b6b66; --line:#e3e2dc; --card:#fff; --accent:#2f6fde;
+        --ok:#1f8a4c; --warn:#b7791f; --bad:#c53030; --code:#f2f1ec; }
+@media (prefers-color-scheme: dark) {
+  :root { --bg:#16171a; --fg:#e8e6e1; --muted:#9a988f; --line:#2c2d31; --card:#1e1f23; --accent:#6ea0ff;
+          --ok:#4cc38a; --warn:#e0a84a; --bad:#f06a6a; --code:#26272c; }
+}
+* { box-sizing: border-box; }
+body { margin:0; font:15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; background:var(--bg); color:var(--fg); }
+header { display:flex; gap:1rem; align-items:center; padding:.6rem 1rem; border-bottom:1px solid var(--line); flex-wrap:wrap; }
+header .brand { font-weight:700; }
+nav { display:flex; gap:.2rem; flex-wrap:wrap; flex:1; }
+nav a { color:var(--muted); text-decoration:none; padding:.25rem .55rem; border-radius:6px; }
+nav a.on, nav a:hover { color:var(--fg); background:var(--code); }
+main { max-width:1100px; margin:0 auto; padding:1rem; }
+h1 { font-size:1.35rem; margin:.4rem 0 1rem; } h2 { font-size:1.05rem; margin:1.6rem 0 .6rem; }
+a { color:var(--accent); }
+.grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(230px,1fr)); gap:.75rem; }
+.card { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:.8rem 1rem; }
+.card h3 { margin:0 0 .3rem; font-size:.8rem; text-transform:uppercase; letter-spacing:.04em; color:var(--muted); }
+.big { font-size:1.4rem; font-weight:650; }
+.muted { color:var(--muted); } .small { font-size:.85rem; }
+.ok { color:var(--ok); } .warn { color:var(--warn); } .bad { color:var(--bad); }
+.dot::before { content:"●"; margin-right:.35rem; }
+.bar { height:6px; background:var(--code); border-radius:3px; overflow:hidden; margin-top:.35rem; }
+.bar > span { display:block; height:100%; background:var(--ok); }
+.bar.warn > span { background:var(--warn); } .bar.bad > span { background:var(--bad); }
+table { width:100%; border-collapse:collapse; background:var(--card); border:1px solid var(--line); border-radius:10px; overflow:hidden; }
+th, td { text-align:left; padding:.45rem .6rem; border-bottom:1px solid var(--line); vertical-align:top; }
+th { font-size:.78rem; text-transform:uppercase; letter-spacing:.04em; color:var(--muted); font-weight:600; }
+tr:last-child td { border-bottom:0; }
+form.inline { display:inline; }
+label { display:block; margin:.5rem 0 .15rem; font-size:.85rem; color:var(--muted); }
+label.check { display:flex; gap:.4rem; align-items:center; color:var(--fg); }
+input[type=text], input[type=number], input[type=password], select, textarea {
+  width:100%; padding:.4rem .5rem; border:1px solid var(--line); border-radius:6px; background:var(--card); color:var(--fg); font:inherit; }
+textarea { min-height:8rem; font-family:ui-monospace, Menlo, monospace; font-size:.85rem; }
+textarea.tall { min-height:26rem; }
+.row { display:grid; grid-template-columns:repeat(auto-fill,minmax(200px,1fr)); gap:.2rem 1rem; }
+button { padding:.4rem .8rem; border:1px solid var(--line); border-radius:6px; background:var(--card); color:var(--fg); cursor:pointer; font:inherit; }
+button.primary { background:var(--accent); border-color:var(--accent); color:#fff; }
+button.danger { color:var(--bad); }
+.actions { display:flex; gap:.5rem; margin-top:.8rem; flex-wrap:wrap; align-items:center; }
+.flash { padding:.55rem .8rem; border-radius:8px; margin-bottom:.8rem; border:1px solid var(--line); background:var(--card); }
+.flash.ok { border-color:var(--ok); } .flash.error { border-color:var(--bad); color:var(--bad); }
+code, pre { background:var(--code); border-radius:5px; padding:.1rem .3rem; font-size:.85rem; }
+pre { padding:.6rem; overflow:auto; white-space:pre-wrap; }
+.pill { display:inline-block; padding:0 .45rem; border-radius:999px; background:var(--code); font-size:.78rem; }
+.logs { max-height:28rem; overflow:auto; font-size:.75rem; }
+.login { max-width:320px; margin:12vh auto; }
+.msg { padding:.35rem 0; border-bottom:1px dashed var(--line); }
+.msg .who { font-weight:600; } .msg.assistant .who { color:var(--accent); } .msg.tool { color:var(--muted); font-size:.85rem; }

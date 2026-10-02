@@ -22,11 +22,13 @@ from app.db.database import Database
 from app.db.migrate import apply_migrations
 from app.db.repos.users import UserRecord, load_enabled, upsert_allowlist
 from app.decisions.service import DecisionService
+from app.health import HealthState
 from app.orchestrator.orchestrator import Orchestrator
 from app.orchestrator.summary import Summarizer
 from app.settings import SettingsStore, seed_settings
 from app.telegram.adapter import TelegramAdapter
 from app.telegram.addressing import BotIdentity
+from app.telegram.topics import TopicService
 from tests.fakes.fake_embedder import FakeEmbedder
 from tests.fakes.fake_gateway import FakeGateway
 from tests.fakes.fake_llm import FakeLLMClient
@@ -92,6 +94,8 @@ def tg_message(
     from_id: int = JACK_TG,
     chat_id: int = GROUP_ID,
     chat_type: str = "supergroup",
+    forum: bool = False,
+    topic: int | None = None,
     entities: list[MessageEntity] | None = None,
     reply_to: Message | None = None,
     message_id: int | None = None,
@@ -99,10 +103,12 @@ def tg_message(
 ) -> Message:
     global _msg_id
     _msg_id += 1
+    if topic is not None:
+        extra = {"message_thread_id": topic, "is_topic_message": True, **extra}
     return Message(
         message_id=message_id if message_id is not None else _msg_id,
         date=datetime.now(UTC),
-        chat=Chat(id=chat_id, type=chat_type),
+        chat=Chat(id=chat_id, type=chat_type, is_forum=forum or topic is not None or None),
         from_user=tg_user(from_id),
         text=text,
         entities=entities,
@@ -140,6 +146,8 @@ class Stack:
     memory: MemoryService
     store: NoteStore
     embedder: FakeEmbedder
+    topics: TopicService
+    health: HealthState
 
 
 def make_stack(env: Env, llm: FakeLLMClient | None = None, seed: int = 7) -> Stack:
@@ -164,7 +172,16 @@ def make_stack(env: Env, llm: FakeLLMClient | None = None, seed: int = 7) -> Sta
         rng=random.Random(seed),
         constraints=memory.avoid_tags,
     )
-    summarizer = Summarizer(db=env.db, settings=env.settings, llm=llm, users=env.users, tz=TZ)
+    topics = TopicService(db=env.db, settings=env.settings, group_id=lambda: GROUP_ID, clock=clock)
+    health = HealthState()
+    summarizer = Summarizer(
+        db=env.db,
+        settings=env.settings,
+        llm=llm,
+        users=env.users,
+        tz=TZ,
+        history_thread=topics.history_thread,
+    )
     orch = Orchestrator(
         db=env.db,
         settings=env.settings,
@@ -185,6 +202,7 @@ def make_stack(env: Env, llm: FakeLLMClient | None = None, seed: int = 7) -> Sta
         users=env.users,
         tz=TZ,
         memory=memory,
+        history_thread=topics.history_thread,
         clock=clock,
     )
     adapter = TelegramAdapter(
@@ -197,10 +215,24 @@ def make_stack(env: Env, llm: FakeLLMClient | None = None, seed: int = 7) -> Sta
         users=env.users,
         tz=TZ,
         memory=memory,
+        topics=topics,
+        health=health,
     )
     env.closers += [ambient.close, summarizer.close]
     return Stack(
-        adapter, gw, decisions, orch, llm, clock, ambient, summarizer, memory, store, embedder
+        adapter,
+        gw,
+        decisions,
+        orch,
+        llm,
+        clock,
+        ambient,
+        summarizer,
+        memory,
+        store,
+        embedder,
+        topics,
+        health,
     )
 
 

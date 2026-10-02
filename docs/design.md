@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **Status** | Draft v1.18 (bot data never in git; CI and deploy.sh, §14.5) |
+| **Status** | Draft v1.21 (M4 dashboard: security details, raw settings editor, budget DM) |
 | **Name** | Tykee: phonetic spelling of Tyche, the Greek goddess of chance. Telegram handle e.g. `@TykeeBot` (must end in "bot") |
 | **Author** | Jack |
 | **Date** | 2026-10-01 |
@@ -279,6 +279,8 @@ CREATE TABLE memory_inbox (
   source      TEXT,                              -- provenance: telegram:<chat>, web:<url> (M7), topic:<name> (M4)  (0004)
   decided_at  TEXT,                              -- (0004)
   decided_by  INTEGER REFERENCES users(id),      -- NULL when auto-approved (0004)
+  kind        TEXT NOT NULL DEFAULT 'note',      -- 'note' | 'category' | 'option' (0006, harvester suggestions)
+  payload_json TEXT                              -- kind-specific: {phrase, aliases, description} | {category_id, name, tags}
   status      TEXT NOT NULL DEFAULT 'pending',   -- 'pending'|'approved'|'rejected'
   created_at  TEXT NOT NULL DEFAULT (datetime('now'))
 );
@@ -827,9 +829,12 @@ The group has **Topics** enabled. Tykee **reads and learns from every topic**, b
 | `telegram.off_topic_mention` | `ignore` | `ignore` \| `redirect`. |
 | `harvest.enabled` | `true` | Memory harvester on/off. |
 | `harvest.interval_min` | 30 | How often the harvester runs. |
-| `harvest.min_new_messages` | 5 | Skip a topic until it has this many new messages (or the oldest unharvested one is > 6 h old). |
+| `harvest.min_new_messages` | 5 | Skip a topic until it has this many new messages (or the oldest unharvested one is older than `harvest.max_age_hours`, default 6). |
+| `harvest.context_messages` | 10 | Prior messages included above the `--- new ---` line. |
+| `models.harvest` | Haiku-tier | Model for stage 2 (falls back to `models.judge`). |
+| `budget.warn_ratio` | 0.8 | The 80% level: dashboard warning, and the harvester pauses. |
 
-**Changing the answer topic from the dashboard:** Users → Telegram shows a **dropdown of known topics** (name, message count, last activity) and the current answer topic. Selecting a new one takes effect immediately (settings are hot-reloaded); Tykee posts a one-line "I'll hang out here now 👋" in the new topic. `/settopic` sent by the admin inside a topic does the same from Telegram. Only the admin (first user in `ALLOWED_TELEGRAM_IDS`) can change it.
+**Changing the answer topic from the dashboard:** Users → Telegram shows a **dropdown of known topics** (name, message count, last activity) and the current answer topic. Selecting a new one takes effect immediately (settings are hot-reloaded); Tykee posts a one-line "I'll hang out here now 👋" in the new topic. `/settopic` sent by the admin inside a topic does the same from Telegram. Only the admin (first user in `ALLOWED_TELEGRAM_IDS`) can change it. An ignored topic can't be the answer topic (and the answer topic can't be ignored). The topic Tykee leaves was answered live, so its harvest cursor jumps to its newest message; only what's said there afterwards is harvested. Decision buttons pressed in the old topic get their follow-up in the new answer topic, unquoted.
 
 **Learning topic names:** a `forum_topics` table is filled from `forum_topic_created` / `forum_topic_edited` / `forum_topic_closed` / `forum_topic_reopened` service messages, and from the topic-creation message that topic messages reference via `reply_to_message` where Telegram includes it. Topics whose name is unknown are shown as "Topic <id>" until a name is seen; the admin can label them in the dashboard.
 
@@ -838,12 +843,15 @@ The group has **Topics** enabled. Tykee **reads and learns from every topic**, b
 1. Allowlist + allowed group (§10).
 2. `thread_id` in `ignored_topic_ids` → drop.
 3. Persist message with `thread_id`.
-4. `thread_id == answer_topic_id` (or `answer_topic_id` is NULL) → normal flow: commands, mentions, debounce + judge (§10.2).
-5. Otherwise → stop (no judge, no reply), except the off-topic mention handling above. The message waits for the harvester.
+4. `/settopic` from the admin is handled here, in **any** topic (it's how you move Tykee).
+5. `thread_id == answer_topic_id` (or `answer_topic_id` is NULL) → normal flow: commands, mentions, debounce + judge (§10.2).
+6. Otherwise → stop (no judge, no reply), except the off-topic mention handling above. The message waits for the harvester.
+
+Topic service messages (`forum_topic_created/edited/closed/reopened`) update `forum_topics` and are not stored as chat. Reaction updates carry no topic; they're only used for 👎/👍 on unprompted messages, which exist only in the answer topic, so they need no topic gate. `GROUP_TOPIC_ID` seeds `telegram.answer_topic_id` only when the key doesn't exist yet, so clearing it in the dashboard survives restarts.
 
 #### Sending
 
-Every outbound group message (replies, decision keyboards, ambient interjections, scheduled nudges, budget/admin notices) goes through one `send_to_group()` helper that sets `message_thread_id = answer_topic_id`. Replies via aiogram `message.answer()` already inherit the thread, but anything from the scheduler/orchestrator without an incoming message must use the helper, so nothing slips into General.
+Every outbound group message (replies, decision keyboards, ambient interjections, scheduled nudges, budget/admin notices) goes through one `send_to_group()` helper that sets `message_thread_id = answer_topic_id`. If the answer topic is General (`1`), the message is sent **without** `message_thread_id` (Telegram rejects id 1) but still stored with `thread_id = 1`. Replies via aiogram `message.answer()` already inherit the thread, but anything from the scheduler/orchestrator without an incoming message must use the helper, so nothing slips into General.
 
 #### Memory harvester (other topics → second brain)
 
@@ -886,6 +894,15 @@ for each qualifying topic:
     advance cursor
 ```
 
+**Implementation notes (M4):**
+- The scheduler fires every minute; the tick only does work once `harvest.interval_min` has passed, so changing the interval takes effect without a restart. The dashboard can force a tick.
+- No answer topic set → nothing is harvested (every topic is answered live then). Ignored topics are never harvested, including rows stored before the topic was ignored.
+- One harvest runs at a time (the dashboard's "harvest now" waits for a scheduled run instead of racing it).
+- The cursor advances after each successfully applied window, so a failure (LLM down, invalid output, budget) is retried later without re-proposing what already landed. A window whose output is invalid 3 times in a row is skipped (cursor moves past it) so it can't cost money forever; API errors are always retried. The 80% budget check runs before every window, not just once per tick. Each topic harvest writes a `harvest_runs` row (`done` / `error` / `budget` / `skipped`), whose counts include windows applied before a failure.
+- Episode times: the transcript shows household-local times, so a time without an offset is read in `TZ`; a time after the window's last message falls back to that message's time.
+- Facts below confidence 0.6, and facts whose owner isn't a user slug or `shared` (third parties), are dropped. A fact lands in `memories/<owner>/{preferences|places|facts|constraints}.md` (or `shared/topics/…`) once approved.
+- Chosen episodes whose category phrase (or any phrase seen) resolves by alias/slug become `decisions(source='observed', status='accepted')`, matched to an existing option by name. Unknown categories become **inbox suggestions** (`kind='category'`; approving creates the category with those phrasings as aliases). New options with non-negative sentiment in known categories become `kind='option'` suggestions (approving adds the option). Suggestions show in `/inbox` and the dashboard inbox.
+
 - Uses the same **topic allowlist** as the import (§15.4): food & drink, places, entertainment, activities, shopping preferences, routines, dietary restrictions/allergies. Health beyond diet, finances, work and relationship/intimate content are never extracted.
 - Pre-M4 group rows (no `thread_id`) are treated as one "unknown topic" and harvested once like any other.
 - Cost: zero when the group is quiet (the tick is code only); otherwise Haiku-tier, a handful of calls per day for a couple's group, so cents. Counted in `usage` and budget caps; when the budget hits 80%, the harvester pauses before anything user-facing degrades.
@@ -915,13 +932,22 @@ CREATE TABLE topic_harvest (
   PRIMARY KEY (chat_id, thread_id)
 );
 -- usage.purpose gains 'harvest'; decisions.source gains 'observed'
+
+CREATE TABLE harvest_runs (               -- one row per LLM harvest, for the dashboard (M4 addition)
+  id INTEGER PRIMARY KEY, chat_id INTEGER NOT NULL, thread_id INTEGER NOT NULL,
+  from_msg_id INTEGER NOT NULL, to_msg_id INTEGER NOT NULL, messages INTEGER NOT NULL,
+  facts INTEGER NOT NULL DEFAULT 0, decisions INTEGER NOT NULL DEFAULT 0,
+  suggestions INTEGER NOT NULL DEFAULT 0, skipped_out_of_scope INTEGER NOT NULL DEFAULT 0,
+  status TEXT NOT NULL,                   -- 'done' | 'error' | 'budget' | 'skipped'
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
 ```
 
 Conversation history for replies (§7.2) is per `(chat_id, answer topic)`: Tykee's prompt contains the #Tykee conversation, not the other topics' chatter. What it learned elsewhere reaches it through the second brain (retrieval + pinned notes) and observed decisions.
 
 #### Edge cases
 
-- **Answer topic deleted/closed:** a send failing with a thread error raises a red health tile and DMs the admin to pick a new topic in the dashboard or via `/settopic`. Reading/harvesting continues.
+- **Answer topic deleted/closed:** a send failing with a thread or topic error ("message thread not found", `TOPIC_CLOSED`) raises a red health tile and DMs the admin (at most once an hour) to pick a new topic in the dashboard or via `/settopic`, which clears the tile. Reading/harvesting continues.
 - **Topics disabled for the group:** `message_thread_id` disappears, so everything lands in General (`thread_id = 1`). The health tile warns when the answer topic has been silent for 24 h while the group is active.
 - **Group → supergroup migration:** topic ids are kept; only the chat id changes (§10).
 
@@ -946,6 +972,14 @@ LAN-only at `http://<nas>:8081` (host port 8081 maps to 8080 in the container; 8
 | **System** | Reindex vault, run backup now, download backup, view logs tail. |
 
 All settings are read from SQLite on each request, so changes apply instantly with no restart.
+
+**Implementation notes (M4):**
+- **Security:** requests from outside private ranges (RFC 1918, loopback, link-local, and `100.64.0.0/10` for Tailscale) get 403 before anything else. Login is one argon2id password (`DASHBOARD_PASSWORD_HASH`), with a 5-minute lockout after 5 failures per client. The session cookie is signed with `SESSION_SECRET` (32+ chars), HttpOnly, SameSite=Strict, 7-day max age. Every POST needs the session's CSRF token (form field or `X-CSRF-Token` header for HTMX). Without both secrets the dashboard doesn't start (no default credentials). `python -m app.dashboard.hashpw` generates them. `/healthz` is the only unauthenticated route (LAN-only; used by the M6 healthcheck).
+- **Serving:** uvicorn runs inside the bot's event loop with its own signal handling disabled (aiogram owns SIGTERM) and `proxy_headers` off, so the LAN check sees the real peer address.
+- **Settings:** besides the purpose-built pages, a **Settings** page lists every key as JSON. Every dashboard write is validated against the whole settings set (`RuntimeSettings`) before it's saved, so a typo never reaches the running bot. Persona edits keep the last 20 versions in `persona.history`, restorable from Behaviour.
+- **Restart needed for:** user display names/timezones (users are loaded at startup) and `embedding.precision`.
+- **Budget:** tiles turn amber at `budget.warn_ratio` (0.8) and red at 100%. When a reply hits the cap, the admin gets one Telegram DM per household day (§14.4).
+- **Not built in M4:** the `/think` escalation heuristic (§7.1) has no dashboard control because it doesn't exist yet; `models.escalated` is editable for when it does. Import (M5) and backups (M6) show placeholders.
 
 ---
 

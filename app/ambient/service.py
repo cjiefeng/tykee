@@ -58,8 +58,10 @@ class AmbientService:
         users: Sequence[UserRecord],
         tz: ZoneInfo,
         memory: MemoryService | None = None,
+        history_thread: Callable[[int], Awaitable[int | None]] | None = None,
         clock: Callable[[], datetime] = utcnow,
     ) -> None:
+        self._history_thread = history_thread
         self._memory = memory
         self._db = db
         self._settings = settings
@@ -135,8 +137,11 @@ class AmbientService:
             log.info("ambient skipped", extra={"chat_id": chat_id, "rule": rule})
             return
 
+        thread = await self._history_thread(chat_id) if self._history_thread else None
         rows = await self._db.read(
-            lambda c: messages_repo.recent(c, chat_id, s.ambient_window_messages)
+            lambda c: messages_repo.recent(
+                c, chat_id, s.ambient_window_messages, only_thread=thread
+            )
         )
         summary = await self._db.read(lambda c: summaries_repo.get(c, chat_id))
         today_decisions = await self._decisions.today(chat_id, self._tz)

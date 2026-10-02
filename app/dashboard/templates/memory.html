@@ -1,0 +1,20 @@
+{% extends "base.html" %}
+{% block title %}Memory{% endblock %}
+{% block content %}
+<h1>Memory</h1>
+<p>{% if pending %}<a href="/memory/inbox"><b>{{ pending | length }} waiting in the inbox</b></a>{% else %}<span class="muted">Inbox empty.</span> <a href="/memory/inbox?status=approved">history</a>{% endif %}</p>
+<form method="get" action="/memory" class="actions"><input type="text" name="q" value="{{ q }}" placeholder="Search memory (same hybrid search Tykee uses)"><button>Search</button></form>
+{% if q %}
+<h2>Results for “{{ q }}”</h2>
+<table><tr><th>Note</th><th>Section</th><th>Snippet</th><th>Owner</th></tr>
+{% for h in hits %}<tr><td><a href="/memory/note?path={{ h.path | urlencode }}">{{ h.title }}</a><div class="muted small">{{ h.path }}</div></td>
+<td class="small">{{ h.heading or '' }}{% if h.via == 'link' %} <span class="pill">linked</span>{% endif %}</td><td class="small">{{ h.snippet }}</td><td>{{ h.owner }}</td></tr>
+{% else %}<tr><td colspan="4" class="muted">Nothing found.</td></tr>{% endfor %}</table>
+{% endif %}
+<h2>Vault</h2>
+<table><tr><th>Path</th><th>Title</th><th>Owner</th><th>Type</th><th>Chunks</th><th>Updated</th></tr>
+{% for n in notes %}<tr><td><a href="/memory/note?path={{ n.path | urlencode }}">{{ n.path }}</a>{% if n.pinned %} <span class="pill">📌 pinned</span>{% endif %}</td>
+<td>{{ n.title }}</td><td>{{ n.owner }}</td><td>{{ n.type }}</td><td>{{ n.chunks }}</td><td class="small">{{ local(n.updated_at) }}</td></tr>
+{% else %}<tr><td colspan="6" class="muted">The vault is empty.</td></tr>{% endfor %}</table>
+<p class="muted small">Decision logs (<code>logs/</code>) are kept in the vault but not indexed.</p>
+{% endblock %}

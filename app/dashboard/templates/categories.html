@@ -1,0 +1,13 @@
+{% extends "base.html" %}
+{% block title %}Categories{% endblock %}
+{% block content %}
+<h1>Categories & options</h1>
+<p class="muted">Newest first. Claude creates categories as you ask; merge near-duplicates here (the old name keeps working).</p>
+<table><tr><th>Category</th><th>Created</th><th>By</th><th>Uses</th><th>Options</th><th>τ (days)</th></tr>
+{% for c in rows %}
+<tr class="{{ 'muted' if c.merged_into }}"><td><a href="/categories/{{ c.id }}">{{ c.display_name }}</a> <code>{{ c.slug }}</code>
+{% if c.merged_into %}<span class="pill">merged into {{ c.merged_slug }}</span>{% endif %}</td>
+<td class="small">{{ local(c.created_at) }}</td><td>{{ c.created_by }}</td><td>{{ c.uses }}</td><td>{{ c.opts }}</td><td>{{ c.recency_tau_days }}</td></tr>
+{% else %}<tr><td colspan="6" class="muted">No categories yet. Ask Tykee to pick something.</td></tr>{% endfor %}
+</table>
+{% endblock %}

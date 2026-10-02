@@ -10,11 +10,13 @@ import stat
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+import uvicorn
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.exceptions import TelegramUnauthorizedError
 
+from app import inbox_appliers
 from app.ambient.judge import Judge
 from app.ambient.service import AmbientService
 from app.brain.embedder import FastEmbedder, cache_dir_for
@@ -22,20 +24,27 @@ from app.brain.memory import MemoryService
 from app.brain.retrieval import Retriever
 from app.brain.store import NoteStore
 from app.config import Env
+from app.dashboard.app import create_app
+from app.dashboard.core import DashboardDeps
+from app.dashboard.server import make_server, serve
 from app.db.database import Database
 from app.db.migrate import apply_migrations
 from app.db.repos.users import UserRecord, load_enabled, upsert_allowlist
 from app.decisions.service import DecisionService
+from app.harvest import Harvester
+from app.health import HealthState
 from app.llm.client import AnthropicLLMClient
-from app.logging import setup_logging
+from app.logging import LOG_BUFFER, setup_logging
 from app.orchestrator.orchestrator import Orchestrator
 from app.orchestrator.summary import Summarizer
+from app.scheduler import Scheduler
 from app.settings import SettingsStore, seed_settings
 from app.telegram.adapter import TelegramAdapter
 from app.telegram.addressing import BotIdentity
 from app.telegram.gateway import AiogramGateway
 from app.telegram.group import GroupRegistry, resolve_group_id
 from app.telegram.middleware import AccessGate
+from app.telegram.topics import TopicService, seed_answer_topic
 
 log = logging.getLogger("app")
 
@@ -75,6 +84,7 @@ async def run(env: Env) -> None:
     allowlist = env.allowlist
 
     def _bootstrap(conn: sqlite3.Connection) -> tuple[int | None, list[UserRecord]]:
+        seed_answer_topic(conn, env.group_topic_id)  # before seeds: env only fills a missing key
         seed_settings(conn)
         upsert_allowlist(conn, allowlist, env.tz)
         return resolve_group_id(conn, env.group_chat_id), load_enabled(conn, allowlist)
@@ -95,8 +105,13 @@ async def run(env: Env) -> None:
         me = BotIdentity(me_user.id, me_user.username or "")
         gateway = AiogramGateway(bot)
         settings = SettingsStore(db)
+        health = HealthState()
         llm = AnthropicLLMClient(
-            api_key=env.anthropic_api_key, db=db, settings=settings, tz=ZoneInfo(env.tz)
+            api_key=env.anthropic_api_key,
+            db=db,
+            settings=settings,
+            tz=ZoneInfo(env.tz),
+            health=health,
         )
         if not llm.configured:
             log.warning("ANTHROPIC_API_KEY not set: running in fallback mode")
@@ -112,6 +127,7 @@ async def run(env: Env) -> None:
             # Notes still get written and keyword search still works; chunks are marked
             # 'pending' and re-embedded on the next reconcile (§14.4).
             log.exception("embedding model failed to load")
+            health.embedder_ok = False
         store = NoteStore(root=env.data_dir / "vault", db=db, embedder=embedder, tz=tz)
         created = await store.ensure_skeleton(users)
         stats = await store.reconcile()
@@ -126,7 +142,17 @@ async def run(env: Env) -> None:
         decisions = DecisionService(
             db=db, settings=settings, users=users, constraints=memory.avoid_tags
         )
-        summarizer = Summarizer(db=db, settings=settings, llm=llm, users=users, tz=tz)
+        registry = GroupRegistry(db, group_id)
+        topics = TopicService(db=db, settings=settings, group_id=lambda: registry.group_id)
+        inbox_appliers.register(memory, decisions)
+        summarizer = Summarizer(
+            db=db,
+            settings=settings,
+            llm=llm,
+            users=users,
+            tz=tz,
+            history_thread=topics.history_thread,
+        )
         orchestrator = Orchestrator(
             db=db,
             settings=settings,
@@ -146,6 +172,7 @@ async def run(env: Env) -> None:
             users=users,
             tz=tz,
             memory=memory,
+            history_thread=topics.history_thread,
         )
         adapter = TelegramAdapter(
             db=db,
@@ -157,16 +184,70 @@ async def run(env: Env) -> None:
             users=users,
             tz=tz,
             memory=memory,
+            topics=topics,
+            health=health,
         )
         dp = Dispatcher()
         dp.update.outer_middleware(
-            AccessGate(users=users, registry=GroupRegistry(db, group_id), gateway=gateway)
+            AccessGate(users=users, registry=registry, gateway=gateway, health=health)
         )
         dp.include_router(adapter.router())
+        harvester = Harvester(
+            db=db,
+            settings=settings,
+            llm=llm,
+            memory=memory,
+            decisions=decisions,
+            topics=topics,
+            users=users,
+            tz=tz,
+            group_id=lambda: registry.group_id,
+            health=health,
+        )
+        scheduler = Scheduler(tz)
+        scheduler.every_minute("harvest", harvester.tick)
+        scheduler.start()
+        dashboard: uvicorn.Server | None = None
+        dashboard_task: asyncio.Task[None] | None = None
+        if env.dashboard_password_hash and len(env.session_secret) >= 32:
+            dashboard_app = create_app(
+                DashboardDeps(
+                    db=db,
+                    settings=settings,
+                    store=store,
+                    memory=memory,
+                    decisions=decisions,
+                    topics=topics,
+                    health=health,
+                    gateway=gateway,
+                    users=users,
+                    tz=tz,
+                    group_id=lambda: registry.group_id,
+                    db_path=env.db_path,
+                    password_hash=env.dashboard_password_hash,
+                    session_secret=env.session_secret,
+                    log_lines=lambda: list(LOG_BUFFER.lines),
+                    harvester=harvester,
+                    ambient=ambient,
+                    embed_model=embedder.model_id,
+                )
+            )
+            dashboard = make_server(dashboard_app, env.dashboard_host, env.dashboard_port)
+            dashboard_task = asyncio.create_task(serve(dashboard))
+            log.info("dashboard listening", extra={"port": env.dashboard_port})
+        else:
+            log.warning(
+                "dashboard disabled: set DASHBOARD_PASSWORD_HASH and SESSION_SECRET (32+ chars); "
+                "run `python -m app.dashboard.hashpw` to generate them"
+            )
         log.info("polling", extra={"bot": me.username})
         try:
             await dp.start_polling(bot, allowed_updates=ALLOWED_UPDATES)
         finally:
+            if dashboard is not None and dashboard_task is not None:
+                dashboard.should_exit = True
+                await dashboard_task
+            scheduler.shutdown()
             await ambient.close()
             await summarizer.close()
             embedder.close()

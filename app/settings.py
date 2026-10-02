@@ -17,7 +17,9 @@ from app.db.database import Database
 
 SEED_DIR = Path(__file__).parent / "seed"
 
-ModelRole = Literal["default", "escalated", "judge", "import_extract", "import_consolidate"]
+ModelRole = Literal[
+    "default", "escalated", "judge", "import_extract", "import_consolidate", "harvest"
+]
 
 
 class Pricing(BaseModel):
@@ -35,6 +37,11 @@ class Models(BaseModel):
     judge: str
     import_extract: str
     import_consolidate: str
+    harvest: str = ""  # falls back to judge (both Haiku-tier) when unset
+
+    def for_role(self, role: str) -> str:
+        value = str(getattr(self, role))
+        return value or (self.judge if role == "harvest" else value)
 
 
 class RuntimeSettings(BaseModel):
@@ -62,9 +69,18 @@ class RuntimeSettings(BaseModel):
     memory_auto_approve: bool = False
     memory_search_k: int = 6
     memory_pinned_max_chars: int = 6000
+    telegram_answer_topic_id: int | None = None
+    telegram_ignored_topic_ids: list[int] = Field(default_factory=list)
+    telegram_off_topic_mention: Literal["ignore", "redirect"] = "ignore"
+    harvest_enabled: bool = True
+    harvest_interval_min: float = 30.0
+    harvest_min_new_messages: int = 5
+    harvest_max_age_hours: float = 6.0
+    harvest_context_messages: int = 10
+    budget_warn_ratio: float = 0.8
 
     def model_for(self, role: ModelRole) -> str:
-        return str(getattr(self.models, role))
+        return self.models.for_role(role)
 
     @classmethod
     def from_rows(cls, rows: dict[str, Any]) -> RuntimeSettings:
