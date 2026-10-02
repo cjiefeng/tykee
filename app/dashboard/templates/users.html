@@ -1,14 +1,15 @@
 {% extends "base.html" %}
 {% block title %}Users{% endblock %}
 {% block content %}
-<h1>Users & Telegram</h1>
-<table><tr><th>User</th><th>Telegram ID</th><th>Display name</th><th>Timezone</th><th></th></tr>
-{% for u in users %}<tr><td><code>{{ u.slug }}</code>{% if u.id in admin_ids %} <span class="pill">admin</span>{% endif %}{% if not u.enabled %} <span class="pill">disabled</span>{% endif %}</td>
+<div class="page-head"><div><h1>Users & Telegram</h1>
+  <p class="lede">Who Tykee answers, which group it lives in, and where it speaks.</p></div></div>
+<div class="table-wrap"><table><tr><th>User</th><th>Telegram ID</th><th>Display name</th><th>Timezone</th><th><span class="sr-only">Save</span></th></tr>
+{% for u in users %}<tr><td><code>{{ u.slug }}</code>{% if u.id in admin_ids %} <span class="pill accent">admin</span>{% endif %}{% if not u.enabled %} <span class="pill">disabled</span>{% endif %}</td>
 <td>{{ u.telegram_id }}</td>
-<td><form method="post" action="/users/{{ u.id }}" id="u-{{ u.id }}">{{ csrf_input }}<input type="text" name="display_name" value="{{ u.display_name }}"></form></td>
-<td><input form="u-{{ u.id }}" type="text" name="timezone" value="{{ u.timezone }}"></td><td><button form="u-{{ u.id }}">Save</button></td></tr>{% endfor %}
-</table>
-<p class="muted small">Users come from <code>ALLOWED_TELEGRAM_IDS</code> in <code>.env</code>; name and timezone changes apply after a restart.</p>
+<td><form method="post" action="/users/{{ u.id }}" id="u-{{ u.id }}">{{ csrf_input }}<input type="text" name="display_name" aria-label="Display name for {{ u.slug }}" value="{{ u.display_name }}"></form></td>
+<td><input form="u-{{ u.id }}" type="text" name="timezone" aria-label="Timezone for {{ u.slug }}" value="{{ u.timezone }}"></td><td><button form="u-{{ u.id }}" class="sm">Save</button></td></tr>{% endfor %}
+</table></div>
+<p class="help">Users come from <code>ALLOWED_TELEGRAM_IDS</code> in <code>.env</code>; name and timezone changes apply after a restart.</p>
 
 <h2>Group</h2>
 {% if not group %}<div class="flash error">No group configured: set <code>GROUP_CHAT_ID</code> (add the bot to the group as admin and it will post the id).</div>
@@ -17,22 +18,23 @@
 <h2>Answer topic</h2>
 <p class="muted">Tykee reads every topic but only speaks in this one. Changing it takes effect immediately and Tykee says hello there.</p>
 <form method="post" action="/telegram/answer-topic" class="actions">{{ csrf_input }}
-  <select name="thread_id" style="max-width:340px">
+  <label for="answer" class="sr-only">Answer topic</label>
+  <select id="answer" name="thread_id">
     <option value="" {{ 'selected' if s.telegram_answer_topic_id is none }}>(none: answer in every topic)</option>
-    {% for t in topics %}<option value="{{ t.thread_id }}" {{ 'selected' if t.thread_id == s.telegram_answer_topic_id }}>{{ t.name }} · {{ t.messages }} msgs{% if t.closed %} · closed{% endif %}</option>{% endfor %}
+    {% for t in topics %}<option value="{{ t.thread_id }}" {{ 'selected' if t.thread_id == s.telegram_answer_topic_id }}>{{ t.name }}, {{ t.messages }} msgs{% if t.closed %}, closed{% endif %}</option>{% endfor %}
   </select><button class="primary">Set answer topic</button>
 </form>
-{% if not topics %}<p class="muted small">No topics seen yet. Send a message in each topic (or <code>/settopic</code> inside #Tykee).</p>{% endif %}
+{% if not topics %}<p class="help">No topics seen yet. Send a message in each topic (or <code>/settopic</code> inside #Tykee).</p>{% endif %}
 
 <h2>Topics</h2>
 <form method="post" action="/telegram/topics" id="topics">{{ csrf_input }}</form>
-<table><tr><th>Topic</th><th>Messages</th><th>Last activity</th><th>Ignore (never read)</th><th>Label</th></tr>
+<div class="table-wrap"><table><tr><th>Topic</th><th>Messages</th><th>Last activity</th><th>Ignore (never read)</th><th>Label</th></tr>
 {% for t in topics %}<tr><td>{{ t.name }} <span class="muted small">#{{ t.thread_id }}</span></td><td>{{ t.messages }}</td><td class="small">{{ local(t.last_activity) }}</td>
-<td><input form="topics" type="checkbox" name="ignored" value="{{ t.thread_id }}" {{ 'checked' if t.thread_id in s.telegram_ignored_topic_ids }}></td>
-<td><form method="post" action="/telegram/topics/{{ t.thread_id }}/label" class="inline">{{ csrf_input }}<input type="text" name="name" value="{{ t.name }}" style="max-width:160px"> <button>Rename</button></form></td></tr>
-{% endfor %}</table>
-<label>Off-topic mentions</label>
-<select form="topics" name="off_topic_mention" style="max-width:340px">
+<td><input form="topics" type="checkbox" name="ignored" aria-label="Ignore {{ t.name }}" value="{{ t.thread_id }}" {{ 'checked' if t.thread_id in s.telegram_ignored_topic_ids }}></td>
+<td><form method="post" action="/telegram/topics/{{ t.thread_id }}/label" class="btn-row">{{ csrf_input }}<input type="text" name="name" aria-label="Label for topic {{ t.thread_id }}" value="{{ t.name }}" style="max-width:180px"><button class="sm">Rename</button></form></td></tr>
+{% else %}<tr><td colspan="5">No topics seen yet.</td></tr>{% endfor %}</table></div>
+<label for="offtopic">Off-topic mentions</label>
+<select id="offtopic" form="topics" name="off_topic_mention" style="max-width:420px">
   <option value="ignore" {{ 'selected' if s.telegram_off_topic_mention == 'ignore' }}>ignore (most private)</option>
   <option value="redirect" {{ 'selected' if s.telegram_off_topic_mention == 'redirect' }}>redirect: "Ask me in #Tykee 👋", once a day per topic</option>
 </select>

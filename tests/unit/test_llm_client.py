@@ -142,3 +142,124 @@ async def test_json_schema_becomes_output_config(env: Env) -> None:
     sent = json.loads(script.requests[0].content)
     assert sent["output_config"] == {"format": {"type": "json_schema", "schema": schema}}
     assert "tool_choice" not in sent and "tools" not in sent
+
+
+# --- Message Batches and streaming (bootstrap import, §15.3) ---------------------------------
+
+
+def _batch(status: str = "in_progress") -> dict[str, Any]:
+    return {
+        "id": "msgbatch_1",
+        "type": "message_batch",
+        "processing_status": status,
+        "request_counts": {"processing": 0, "succeeded": 1, "errored": 1, "canceled": 0,
+                           "expired": 0},
+        "created_at": "2026-10-02T00:00:00Z",
+        "expires_at": "2026-10-03T00:00:00Z",
+        "ended_at": None,
+        "archived_at": None,
+        "cancel_initiated_at": None,
+        "results_url": "https://api.anthropic.com/v1/messages/batches/msgbatch_1/results",
+    }  # fmt: skip
+
+
+def _import_req(env: Env, job_id: int) -> LLMRequest:
+    return LLMRequest(
+        purpose="import_extract",
+        model_role="import_extract",
+        system=[{"type": "text", "text": "rules"}],
+        messages=[{"role": "user", "content": "chat"}],
+        max_tokens=16000,
+        json_schema={"type": "object"},
+        import_job_id=job_id,
+    )
+
+
+async def _job(env: Env) -> int:
+    return await env.db.write(
+        lambda c: int(
+            c.execute(
+                "INSERT INTO import_jobs(source, file_sha256, since, status) "
+                "VALUES ('telegram', 'abc', '2026-04-01', 'extracting')"
+            ).lastrowid
+            or 0
+        )
+    )
+
+
+async def test_batch_submit_status_and_results_record_discounted_usage(env: Env) -> None:
+    model = seed_values()["models.import_extract"]
+    job_id = await _job(env)
+    jsonl = "\n".join(
+        json.dumps(line)
+        for line in [
+            {"custom_id": "w1", "result": {"type": "succeeded", "message": _ok_body(model)}},
+            {"custom_id": "w2", "result": {"type": "errored", "error": {"type": "error",
+             "error": {"type": "api_error", "message": "x"}}}},
+        ]
+    )  # fmt: skip
+    script = Script(
+        httpx2.Response(200, json=_batch()),
+        httpx2.Response(200, json=_batch("ended")),
+        httpx2.Response(200, json=_batch("ended")),
+        httpx2.Response(200, text=jsonl, headers={"content-type": "application/x-jsonl"}),
+    )
+    client = _client(env, script)
+    req = _import_req(env, job_id)
+    assert await client.submit_batch([("w1", req), ("w2", req)]) == "msgbatch_1"
+    body = json.loads(script.requests[0].content)
+    assert [r["custom_id"] for r in body["requests"]] == ["w1", "w2"]
+    params = body["requests"][0]["params"]
+    assert params["model"] == model and params["max_tokens"] == 16000
+    assert params["output_config"]["format"]["type"] == "json_schema"
+
+    assert await client.batch_status("msgbatch_1") == "ended"
+    results = await client.batch_results("msgbatch_1", req)
+    assert [(r.custom_id, r.response is not None) for r in results] == [("w1", True), ("w2", False)]
+    assert "api_error" in results[1].error
+    price = seed_values()[f"pricing.{model}"]
+    full = (1000 * price["input"] + 100 * price["output"] + 2000 * price["cache_read"]) / 1e6
+    row = await env.db.read(lambda c: c.execute("SELECT * FROM usage").fetchone())
+    assert (row["purpose"], row["import_job_id"]) == ("import_extract", job_id)
+    assert row["cost_usd"] == pytest.approx(full / 2)
+
+
+async def test_import_calls_ignore_the_daily_cap_but_not_the_monthly(env: Env) -> None:
+    job_id = await _job(env)
+    await env.db.write(lambda c: set_value(c, "budget.daily_usd", 0.5))
+    row = usage_repo.UsageRow(None, "chat", -1, None, "m", 1, 1, 0, 0, 0.6, to_sql(utcnow()))
+    await env.db.write(lambda c: usage_repo.insert(c, row))
+    script = Script(httpx2.Response(200, json=_batch()))
+    client = _client(env, script)
+    await client.submit_batch([("w1", _import_req(env, job_id))])  # daily cap doesn't apply
+    with pytest.raises(BudgetExceeded):
+        await client.complete(_req(env))  # but chat is still capped
+    await env.db.write(lambda c: set_value(c, "budget.monthly_usd", 0.5))
+    with pytest.raises(BudgetExceeded) as ei:
+        await client.submit_batch([("w1", _import_req(env, job_id))])
+    assert ei.value.period == "monthly"
+
+
+async def test_stream_request_uses_sse_and_records_usage(env: Env) -> None:
+    model = seed_values()["models.import_consolidate"]
+    events = [
+        ("message_start", {"type": "message_start", "message": {**_ok_body(model), "content": [],
+         "stop_reason": None, "usage": {"input_tokens": 50, "output_tokens": 1}}}),
+        ("content_block_start", {"type": "content_block_start", "index": 0,
+         "content_block": {"type": "text", "text": ""}}),
+        ("content_block_delta", {"type": "content_block_delta", "index": 0,
+         "delta": {"type": "text_delta", "text": '{"ok": true}'}}),
+        ("content_block_stop", {"type": "content_block_stop", "index": 0}),
+        ("message_delta", {"type": "message_delta", "delta": {"stop_reason": "end_turn",
+         "stop_sequence": None}, "usage": {"output_tokens": 20}}),
+        ("message_stop", {"type": "message_stop"}),
+    ]  # fmt: skip
+    sse = "".join(f"event: {name}\ndata: {json.dumps(data)}\n\n" for name, data in events)
+    script = Script(httpx2.Response(200, text=sse, headers={"content-type": "text/event-stream"}))
+    req = _import_req(env, await _job(env))
+    req.purpose, req.model_role, req.stream = "import_consolidate", "import_consolidate", True
+    resp = await _client(env, script).complete(req)
+    assert resp.text == '{"ok": true}'
+    assert json.loads(script.requests[0].content)["stream"] is True
+    row = await env.db.read(lambda c: c.execute("SELECT * FROM usage").fetchone())
+    assert (row["input_tokens"], row["output_tokens"]) == (50, 20)

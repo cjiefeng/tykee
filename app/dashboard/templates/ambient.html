@@ -1,49 +1,50 @@
 {% extends "base.html" %}
 {% block title %}Ambient{% endblock %}
 {% block content %}
-<h1>Ambient & harvester</h1>
+<div class="page-head"><div><h1>Ambient & harvester</h1>
+  <p class="lede">When Tykee speaks up unasked, and what it learns from the other topics.</p></div></div>
 <div class="grid">
   <div class="card"><h3>Group mute</h3>
-    {% if state and state.muted_until %}<div>muted until {{ local(state.muted_until) }}</div>
-      <form method="post" action="/ambient/unmute" class="actions">{{ csrf_input }}<button>Unmute</button></form>
-    {% else %}<div class="ok">not muted</div>{% endif %}</div>
+    {% if state and state.muted_until %}<div class="dot warn">muted until {{ local(state.muted_until) }}</div>
+      <form method="post" action="/ambient/unmute" class="actions">{{ csrf_input }}<button class="sm">Unmute</button></form>
+    {% else %}<div class="dot ok">not muted</div>{% endif %}</div>
   <div class="card"><h3>Today</h3>
-    <div>{{ state.unprompted_today if state else 0 }} unprompted replies</div>
-    <div class="muted small">cooldown × {{ state.cooldown_multiplier if state else 1 }}</div></div>
+    <div class="big">{{ state.unprompted_today if state else 0 }}</div>
+    <div class="muted small">unprompted replies, cooldown × {{ state.cooldown_multiplier if state else 1 }}</div></div>
   <div class="card"><h3>Harvester</h3><div>last check {{ health.last_harvest_tick_at | ago }}</div>
-    <form method="post" action="/ambient/harvest" class="actions">{{ csrf_input }}<button>Run harvest now</button></form></div>
+    <form method="post" action="/ambient/harvest" class="actions">{{ csrf_input }}<button class="sm">Run harvest now</button></form></div>
 </div>
 
 <h2>Settings</h2>
-<form method="post" action="/ambient/settings">{{ csrf_input }}
+<form method="post" action="/ambient/settings" class="form-panel">{{ csrf_input }}
   <label class="check"><input type="checkbox" name="ambient.enabled" {{ 'checked' if s.ambient_enabled }}> Speak-or-stay-silent enabled</label>
   <label class="check"><input type="checkbox" name="harvest.enabled" {{ 'checked' if s.harvest_enabled }}> Memory harvester enabled</label>
   <div class="row">
-    {% for key in numbers %}<div><label>{{ key }}</label><input type="number" step="any" name="{{ key }}" value="{{ raw.get(key, '') }}"></div>{% endfor %}
+    {% for key in numbers %}<div><label for="a-{{ loop.index }}">{{ key }}</label><input id="a-{{ loop.index }}" type="number" step="any" name="{{ key }}" value="{{ raw.get(key, '') }}"></div>{% endfor %}
   </div>
   <div class="row">
-    <div><label>ambient.mute_phrases (one per line)</label><textarea name="ambient.mute_phrases">{{ s.ambient_mute_phrases | join('\n') }}</textarea></div>
-    <div><label>ambient.negative_phrases (one per line)</label><textarea name="ambient.negative_phrases">{{ s.ambient_negative_phrases | join('\n') }}</textarea></div>
+    <div><label for="mute">ambient.mute_phrases (one per line)</label><textarea id="mute" name="ambient.mute_phrases">{{ s.ambient_mute_phrases | join('\n') }}</textarea></div>
+    <div><label for="neg">ambient.negative_phrases (one per line)</label><textarea id="neg" name="ambient.negative_phrases">{{ s.ambient_negative_phrases | join('\n') }}</textarea></div>
   </div>
-  <label>Judge prompt</label><textarea name="ambient.judge_prompt" class="tall">{{ s.ambient_judge_prompt }}</textarea>
+  <label for="judge">Judge prompt</label><textarea id="judge" name="ambient.judge_prompt" class="tall">{{ s.ambient_judge_prompt }}</textarea>
   <div class="actions"><button class="primary">Save</button></div>
 </form>
 
 <h2>Judge decisions</h2>
-<table><tr><th>When</th><th>Action</th><th>Rule</th><th>Confidence</th><th>Reason</th><th>Feedback</th></tr>
+<div class="table-wrap"><table><tr><th>When</th><th>Action</th><th>Rule</th><th>Confidence</th><th>Reason</th><th>Feedback</th></tr>
 {% for r in log %}<tr><td class="muted small">{{ local(r.created_at) }}</td>
-<td class="{{ 'ok' if r.action == 'respond' else 'muted' }}">{{ r.action }}</td><td>{{ r.rule or '' }}</td>
+<td><span class="pill {{ 'st-ok' if r.action == 'respond' else '' }}">{{ r.action }}</span></td><td>{{ r.rule or '' }}</td>
 <td>{{ '%.2f' % r.confidence if r.confidence is not none else '' }}</td><td class="small">{{ r.reason or '' }}</td>
-<td class="{{ 'bad' if r.feedback == 'negative' else 'ok' }}">{{ r.feedback or '' }}</td></tr>
-{% else %}<tr><td colspan="6" class="muted">Nothing judged yet.</td></tr>{% endfor %}
-</table>
+<td>{% if r.feedback %}<span class="pill {{ 'st-bad' if r.feedback == 'negative' else 'st-ok' }}">{{ r.feedback }}</span>{% endif %}</td></tr>
+{% else %}<tr><td colspan="6">Nothing judged yet.</td></tr>{% endfor %}
+</table></div>
 
 <h2>Harvest runs</h2>
-<table><tr><th>When</th><th>Topic</th><th>Messages</th><th>Facts</th><th>Decisions</th><th>Suggestions</th><th>Skipped</th><th>Status</th></tr>
+<div class="table-wrap"><table><tr><th>When</th><th>Topic</th><th>Messages</th><th>Facts</th><th>Decisions</th><th>Suggestions</th><th>Skipped</th><th>Status</th></tr>
 {% for r in runs %}<tr><td class="muted small">{{ local(r.created_at) }}</td><td>{{ r.topic or ('Topic %d' % r.thread_id if r.thread_id else 'earlier chat') }}</td>
 <td>{{ r.messages }}</td><td>{{ r.facts }}</td><td>{{ r.decisions }}</td><td>{{ r.suggestions }}</td><td>{{ r.skipped_out_of_scope }}</td>
-<td class="{{ 'ok' if r.status == 'done' else 'warn' }}">{{ r.status }}</td></tr>
-{% else %}<tr><td colspan="8" class="muted">No harvests yet.</td></tr>{% endfor %}
-</table>
-{% if cursors %}<p class="muted small">Cursors: {% for c in cursors %}{{ c.topic or c.thread_id }} → msg {{ c.last_msg_id }} (checked {{ c.last_tick_at | ago }}){{ ', ' if not loop.last }}{% endfor %}</p>{% endif %}
+<td><span class="pill {{ 'st-ok' if r.status == 'done' else 'st-warn' }}">{{ r.status }}</span></td></tr>
+{% else %}<tr><td colspan="8">No harvests yet.</td></tr>{% endfor %}
+</table></div>
+{% if cursors %}<p class="help">Cursors: {% for c in cursors %}{{ c.topic or c.thread_id }} → msg {{ c.last_msg_id }} (checked {{ c.last_tick_at | ago }}){{ ', ' if not loop.last }}{% endfor %}</p>{% endif %}
 {% endblock %}

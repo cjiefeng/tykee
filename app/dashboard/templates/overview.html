@@ -2,19 +2,25 @@
 {% block title %}Overview{% endblock %}
 {% macro meter(spent, cap) -%}
   {%- set r = (spent / cap) if cap else 0 -%}
-  <div class="bar {{ 'bad' if r >= 1 else ('warn' if r >= warn else '') }}"><span style="width: {{ [r * 100, 100] | min }}%"></span></div>
+  <div class="bar {{ 'bad' if r >= 1 else ('warn' if r >= warn else '') }}" role="meter" aria-valuemin="0" aria-valuemax="100" aria-valuenow="{{ ([r * 100, 100] | min) | round(0) }}" aria-label="Share of cap used"><span style="width: {{ [r * 100, 100] | min }}%"></span></div>
 {%- endmacro %}
 {% block content %}
-<h1>Overview</h1>
+<div class="page-head"><div><h1>Overview</h1>
+  <p class="lede">Spend, health and what Tykee decided lately.</p></div></div>
+
 <div class="grid">
   <div class="card"><h3>Spend today</h3>
     <div class="big {{ 'bad' if budget.daily_spent >= budget.daily_cap else ('warn' if budget.daily_spent >= warn * budget.daily_cap else '') }}">{{ spend.today | usd }}</div>
-    <div class="muted small">of {{ budget.daily_cap | usd }} · {{ spend.calls_today }} calls</div>{{ meter(budget.daily_spent, budget.daily_cap) }}</div>
+    <div class="muted small">of {{ budget.daily_cap | usd }}, {{ spend.calls_today }} calls</div>{{ meter(budget.daily_spent, budget.daily_cap) }}</div>
   <div class="card"><h3>Spend this month</h3>
     <div class="big {{ 'bad' if budget.monthly_spent >= budget.monthly_cap else ('warn' if budget.monthly_spent >= warn * budget.monthly_cap else '') }}">{{ spend.month | usd }}</div>
     <div class="muted small">of {{ budget.monthly_cap | usd }}</div>{{ meter(budget.monthly_spent, budget.monthly_cap) }}</div>
   <div class="card"><h3>Messages today</h3><div class="big">{{ counts.messages_today }}</div>
-    <div class="muted small">{{ counts.inbox_pending }} memories waiting in the <a href="/memory/inbox">inbox</a></div></div>
+    <div class="muted small">{{ counts.inbox_pending }} {{ 'memory' if counts.inbox_pending == 1 else 'memories' }} waiting in the <a href="/memory/inbox">inbox</a></div></div>
+</div>
+
+<h2>Health</h2>
+<div class="grid">
   <div class="card"><h3>Telegram</h3>
     <div class="dot {{ 'ok' if health.last_update_at else 'warn' }}">last update {{ health.last_update_at | ago }}</div>
     <div class="muted small">group {{ group or "not configured" }}</div></div>
@@ -25,9 +31,9 @@
     {% if health.answer_topic_error %}<div class="dot bad">{{ health.answer_topic_error }}</div>
     {% elif answer is none %}<div class="dot warn">not set: answering in every topic</div>
     {% else %}<div class="dot ok">{{ answer_name }}</div>{% endif %}
-    <div class="muted small"><a href="/users">change</a></div></div>
+    <div class="muted small"><a href="/users">Change</a></div></div>
   <div class="card"><h3>Memory index</h3>
-    <div>{{ counts.notes }} notes · {{ counts.chunks }} chunks</div>
+    <div>{{ counts.notes }} notes, {{ counts.chunks }} chunks</div>
     <div class="small {{ 'warn' if counts.pending_chunks else 'muted' }}">{{ counts.pending_chunks }} waiting for embeddings</div>
     <div class="muted small">{{ embed_model }}</div></div>
   <div class="card"><h3>Harvester</h3>
@@ -39,16 +45,16 @@
 
 {% if spend.by_purpose %}
 <h2>This month by purpose</h2>
-<table><tr><th>Purpose</th><th>Calls</th><th>Cost</th></tr>
+<div class="table-wrap"><table><tr><th>Purpose</th><th>Calls</th><th>Cost</th></tr>
 {% for p, n, c in spend.by_purpose %}<tr><td>{{ p }}</td><td>{{ n }}</td><td>{{ c | usd }}</td></tr>{% endfor %}
-</table>
+</table></div>
 {% endif %}
 
 <h2>Recent decisions</h2>
-<table><tr><th>When</th><th>Category</th><th>Choice</th><th>For</th><th>Status</th></tr>
+<div class="table-wrap"><table><tr><th>When</th><th>Category</th><th>Choice</th><th>For</th><th>Status</th></tr>
 {% for d in decisions %}
 <tr><td class="muted small">{{ local(d.created_at) }}</td><td>{{ d.category }}</td><td>{{ d.choice_text }}</td>
-<td>{{ d.for_users }}</td><td><span class="pill">{{ d.status }}</span>{% if d.source != 'live' %} <span class="pill">{{ d.source }}</span>{% endif %}</td></tr>
-{% else %}<tr><td colspan="5" class="muted">No decisions yet.</td></tr>{% endfor %}
-</table>
+<td>{{ d.for_users }}</td><td><span class="pill st-{{ d.status }}">{{ d.status }}</span>{% if d.source != 'live' %} <span class="pill">{{ d.source }}</span>{% endif %}</td></tr>
+{% else %}<tr><td colspan="5">No decisions yet. Ask Tykee to pick something in Telegram.</td></tr>{% endfor %}
+</table></div>
 {% endblock %}

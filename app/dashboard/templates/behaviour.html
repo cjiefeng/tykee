@@ -1,29 +1,32 @@
 {% extends "base.html" %}
 {% block title %}Behaviour{% endblock %}
 {% block content %}
-<h1>Behaviour</h1>
+<div class="page-head"><div><h1>Behaviour</h1>
+  <p class="lede">How Tykee talks, which models it uses, and how much it may spend.</p></div></div>
+
 <h2>Persona</h2>
-<form method="post" action="/behaviour/persona">{{ csrf_input }}
-  <textarea name="persona" class="tall">{{ s.persona_system_prompt }}</textarea>
+<form method="post" action="/behaviour/persona" class="form-panel">{{ csrf_input }}
+  <label for="persona">System prompt</label>
+  <textarea id="persona" name="persona" class="tall">{{ s.persona_system_prompt }}</textarea>
   <div class="actions"><button class="primary">Save persona</button><span class="muted small">The previous version is kept in history.</span></div>
 </form>
 {% if history %}
-<details><summary class="muted">History ({{ history | length }})</summary>
-{% for h in history %}<div class="card" style="margin:.5rem 0"><div class="muted small">replaced {{ h.at }}</div><pre>{{ h.text }}</pre>
-<form method="post" action="/behaviour/persona">{{ csrf_input }}<input type="hidden" name="persona" value="{{ h.text }}"><button>Restore this version</button></form></div>{% endfor %}
+<details class="box"><summary>History ({{ history | length }})</summary>
+{% for h in history %}<div class="card" style="margin:var(--s2) 0"><div class="muted small">replaced {{ h.at }}</div><pre>{{ h.text }}</pre>
+<form method="post" action="/behaviour/persona">{{ csrf_input }}<input type="hidden" name="persona" value="{{ h.text }}"><button class="sm">Restore this version</button></form></div>{% endfor %}
 </details>
 {% endif %}
 
 <h2>Models, limits and budget</h2>
-<form method="post" action="/behaviour/settings">{{ csrf_input }}
+<form method="post" action="/behaviour/settings" class="form-panel">{{ csrf_input }}
   <div class="row">
-    {% for role in roles %}<div><label>models.{{ role }}</label><input type="text" name="models.{{ role }}" value="{{ s.models.for_role(role) }}"></div>{% endfor %}
+    {% for role in roles %}<div><label for="m-{{ role }}">models.{{ role }}</label><input id="m-{{ role }}" type="text" name="models.{{ role }}" value="{{ s.models.for_role(role) }}"></div>{% endfor %}
   </div>
   <div class="row">
-    {% for key in numbers %}<div><label>{{ key }}</label><input type="number" step="any" name="{{ key }}" value="{{ raw.get(key, '') }}"></div>{% endfor %}
+    {% for key in numbers %}<div><label for="n-{{ loop.index }}">{{ key }}</label><input id="n-{{ loop.index }}" type="number" step="any" name="{{ key }}" value="{{ raw.get(key, '') }}"></div>{% endfor %}
   </div>
   <label class="check"><input type="checkbox" name="memory.auto_approve" {{ 'checked' if s.memory_auto_approve }}> Auto-approve implicit memories (skip the inbox; web facts still need review)</label>
-  <p class="muted small">Model IDs need a matching <code>pricing.&lt;model&gt;</code> entry in <a href="/settings">Settings</a> for cost tracking.
+  <p class="help">Model IDs need a matching <code>pricing.&lt;model&gt;</code> entry in <a href="/settings">Settings</a> for cost tracking.
   Embedding precision (<code>embedding.precision</code>) applies after a restart.</p>
   <div class="actions"><button class="primary">Save</button></div>
 </form>

@@ -56,6 +56,7 @@ def create_app(deps: DashboardDeps) -> FastAPI:
         views_behaviour,
         views_categories,
         views_chat,
+        views_import,
         views_memory,
         views_overview,
     )
@@ -112,7 +113,14 @@ def create_app(deps: DashboardDeps) -> FastAPI:
         request.session.clear()
         return RedirectResponse("/login", status_code=303)
 
-    for module in (views_overview, views_behaviour, views_categories, views_memory, views_chat):
+    for module in (
+        views_overview,
+        views_behaviour,
+        views_categories,
+        views_memory,
+        views_chat,
+        views_import,
+    ):
         module.register(private, deps)
 
     app.include_router(public)

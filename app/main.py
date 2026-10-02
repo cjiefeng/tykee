@@ -1,4 +1,4 @@
-"""Process entrypoint: migrate → seed → run the bot (dashboard and scheduler join in M4/M6)."""
+"""Process entrypoint: migrate → seed → run the bot, dashboard and scheduler (harvester, import)."""
 
 from __future__ import annotations
 
@@ -33,6 +33,7 @@ from app.db.repos.users import UserRecord, load_enabled, upsert_allowlist
 from app.decisions.service import DecisionService
 from app.harvest import Harvester
 from app.health import HealthState
+from app.importer.service import ImportService
 from app.llm.client import AnthropicLLMClient
 from app.logging import LOG_BUFFER, setup_logging
 from app.orchestrator.orchestrator import Orchestrator
@@ -204,8 +205,20 @@ async def run(env: Env) -> None:
             group_id=lambda: registry.group_id,
             health=health,
         )
+        importer = ImportService(
+            db=db,
+            settings=settings,
+            llm=llm,
+            batches=llm,
+            store=store,
+            users=users,
+            tz=tz,
+            imports_dir=env.data_dir / "imports",
+        )
+        importer.sweep()
         scheduler = Scheduler(tz)
         scheduler.every_minute("harvest", harvester.tick)
+        scheduler.every_minute("import", importer.tick)
         scheduler.start()
         dashboard: uvicorn.Server | None = None
         dashboard_task: asyncio.Task[None] | None = None
@@ -230,6 +243,7 @@ async def run(env: Env) -> None:
                     harvester=harvester,
                     ambient=ambient,
                     embed_model=embedder.model_id,
+                    importer=importer,
                 )
             )
             dashboard = make_server(dashboard_app, env.dashboard_host, env.dashboard_port)

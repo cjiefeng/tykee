@@ -14,9 +14,14 @@ from app import inbox_appliers
 from app.dashboard.app import create_app
 from app.dashboard.core import DashboardDeps, hash_password
 from app.harvest import Harvester
+from app.importer.service import ImportService
 from app.settings import get_value, set_value
 from app.telegram.topics import KEY_ANSWER
 from tests.conftest import GROUP_ID, TZ, Env, Stack, make_stack, seed_category, tg_message
+from tests.fakes.fake_batches import FakeBatches
+from tests.fakes.fake_llm import FakeLLMClient
+from tests.fakes.telegram_export import dinner_chat, dumps, single_chat
+from tests.unit.test_import_flow import CATEGORIES, NOTES, extraction
 
 PASSWORD = "correct horse battery staple"
 _HASH = hash_password(PASSWORD)  # argon2 is slow by design; hash once per module
@@ -96,6 +101,17 @@ async def dash(env: Env) -> AsyncIterator[Dash]:
         harvester=harvester,
         ambient=stack.ambient,
         embed_model="fake@test",
+        importer=ImportService(
+            db=env.db,
+            settings=env.settings,
+            llm=FakeLLMClient(CATEGORIES, NOTES),
+            batches=FakeBatches(responder=extraction),
+            store=stack.store,
+            users=env.users,
+            tz=TZ,
+            imports_dir=env.vault.parent / "imports",
+            clock=stack.clock,
+        ),
     )
     async with _client(create_app(deps)) as client:
         yield Dash(client, stack, deps)
@@ -493,3 +509,79 @@ async def test_note_redirects_encode_the_path(dash: Dash) -> None:
     )
     assert r.headers["location"] == "/memory/note?path=memories/jack/%E5%92%96%E5%95%A1.md"
     assert (await dash.client.get(r.headers["location"])).status_code == 200
+
+
+# --- import wizard (§15.2) ----------------------------------------------------------------------
+
+
+async def test_import_wizard_end_to_end(dash: Dash) -> None:
+    await dash.login()
+    svc = dash.deps.importer
+    assert svc is not None
+    await dash.stack.store.ensure_skeleton(dash.deps.users)
+    files = {"export": ("result.json", dumps(single_chat(dinner_chat())), "application/json")}
+    r = await dash.post("/import/upload", files=files)
+    assert r.status_code == 303 and r.headers["location"] == "/import/1"
+    page = (await dash.client.get("/import/1")).text
+    assert "Telegram single-chat export: <b>Jack &amp; Sam</b>, 12 messages" in page
+    assert 'name="sender:user222"' in page and "Preview &amp; estimate cost" in page
+
+    again = await dash.post("/import/upload", files=files)
+    assert again.headers["location"] == "/import/1"
+    assert "already uploaded" in await dash.flash("/import/1")
+    bad = {"export": ("x.json", b'{"nope": 1}', "application/json")}
+    await dash.post("/import/upload", files=bad)
+    assert "isn&#39;t a Telegram export" in await dash.flash("/import")
+
+    form = {"chats": "4242", "since": "2026-04-02", "until": "2026-10-02",
+            "sender:user111": "jack", "sender:user222": "partner"}  # fmt: skip
+    await dash.post("/import/1/configure", form)
+    page = (await dash.client.get("/import/1")).text
+    assert "Preview &amp; cost" in page and "partner: not mala again lah" in page
+    assert "Both participants agreed" in page
+
+    await dash.post("/import/1/start")  # no consent
+    assert "consent box" in await dash.flash("/import/1")
+    r = await dash.post("/import/1/start", {"consent": "on"})
+    assert r.status_code == 303
+    if svc._kick is not None:
+        await svc._kick
+    assert (await svc.job(1)).status == "extracting"
+    page = (await dash.client.get("/import/1")).text
+    assert "0 / 4 windows" in page and 'hx-trigger="every 5s"' in page
+    dash.stack.clock.advance(minutes=5)
+    await svc.tick()
+    job = await svc.job(1)
+    assert job.status == "review", job.error
+    progress = await dash.client.get("/import/1/progress", headers={"HX-Request": "true"})
+    assert progress.headers.get("hx-redirect") == "/import/1"
+
+    page = (await dash.client.get("/import/1")).text
+    assert "Review the <b>categories first</b>" in page and "makan where" in page
+    cats = await svc.review(1, "category")
+    edit = {"slug": "dinner", "display_name": "Dinner time", "description": "eat",
+            "recency_tau_days": "2", "default_n": "1",
+            "aliases": "makan where, 晚餐, dinner"}  # fmt: skip
+    await dash.post(f"/import/1/categories/{cats[0].id}", edit)
+    assert (await svc.review(1, "category"))[0].payload["display_name"] == "Dinner time"
+    for tab in ("categories", "options", "decisions", "notes"):
+        await dash.post("/import/1/bulk", {"tab": tab, "min_conf": "0.8"})
+        assert (await dash.client.get(f"/import/1?tab={tab}")).status_code == 200
+    (note,) = await svc.review(1, "note")
+    await dash.post(f"/import/1/notes/{note.id}", {"text": "- Finds mala too heavy\n\nLikes YTF"})
+    assert [ln["text"] for ln in (await svc.review(1, "note"))[0].payload["lines"]] == [
+        "Finds mala too heavy",
+        "Likes YTF",
+    ]
+    r = await dash.post("/import/1/apply", {"delete_export": "on"})
+    assert "Applied: 1 categories, 2 options, 4 decisions, 1 notes" in await dash.flash("/import/1")
+    assert (await svc.job(1)).status == "done"
+    assert "done" in (await dash.client.get("/import")).text
+
+
+async def test_import_upload_size_limit(dash: Dash, env: Env) -> None:
+    await dash.login()
+    await env.db.write(lambda c: set_value(c, "import.max_upload_mb", 1))
+    big = {"export": ("result.json", b"x" * (3 * 1024 * 1024), "application/json")}
+    await dash.post("/import/upload", files=big)
+    assert "Too big" in await dash.flash("/import")
