@@ -56,4 +56,16 @@
   Tool versions are in <a href="/settings">Settings</a> (<code>web.tool_versions</code>). Facts found on the web always go to the memory inbox.</p>
   <div class="actions"><button class="primary">Save web settings</button></div>
 </form>
+
+<h2 id="recommend">Recommendations</h2>
+<p class="lede">"Brunch around Tiong Bahru, pet friendly": picks from known places, plus web finds when there aren't enough. Places, their attributes and your own areas are under <a href="/memory/places">Memory → Places</a>.</p>
+<form method="post" action="/behaviour/recommend" class="form-panel">{{ csrf_input }}
+  <div class="row">
+    {% for key in recommend_numbers %}<div><label for="r-{{ loop.index }}">{{ key }}</label><input id="r-{{ loop.index }}" type="number" step="any" min="0" name="{{ key }}" value="{{ raw.get(key, '') }}"></div>{% endfor %}
+  </div>
+  <p class="help"><code>default_n</code>: picks per reply (1-5). <code>default_radius_m</code>: used around a place without an area radius.
+  <code>explore_ratio</code>: share of picks kept for places you haven't been to (0.34 = 1 in 3). <code>web_attr_ttl_days</code>: after this, web-sourced labels like "pets OK" count as unconfirmed.
+  <code>max_web_searches</code>: searches per recommendation, within the daily web cap.</p>
+  <div class="actions"><button class="primary">Save recommendation settings</button></div>
+</form>
 {% endblock %}

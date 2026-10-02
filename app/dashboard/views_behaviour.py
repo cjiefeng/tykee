@@ -38,6 +38,13 @@ WEB_NUMBERS = {
     "web.daily_search_cap": int,
     "pricing.web_search": float,
 }
+RECOMMEND_NUMBERS = {
+    "recommend.default_n": int,
+    "recommend.default_radius_m": int,
+    "recommend.explore_ratio": float,
+    "recommend.web_attr_ttl_days": int,
+    "recommend.max_web_searches": int,
+}
 WEB_LOCATION_FIELDS = ["city", "region", "country", "timezone"]
 WEB_DOMAIN_LISTS = ["web.allowed_domains", "web.blocked_domains"]
 AMBIENT_NUMBERS = {
@@ -88,6 +95,7 @@ def register(router: APIRouter, deps: DashboardDeps) -> None:
             history=list(reversed(history)),
             raw=await _raw_map(deps),
             web_numbers=WEB_NUMBERS,
+            recommend_numbers=RECOMMEND_NUMBERS,
             web_status=await web_status(deps.db, s, deps.tz),
             searches_today=await queries.web_searches_today(deps.db, utcnow(), deps.tz),
         )
@@ -149,6 +157,15 @@ def register(router: APIRouter, deps: DashboardDeps) -> None:
         except queries.SettingsError as e:
             return back(request, "/behaviour", f"Not saved: {e}", "error")
         return back(request, "/behaviour", "Web settings saved. They apply to the next message.")
+
+    @router.post("/behaviour/recommend")
+    async def recommend_settings(request: Request) -> Response:
+        form = await request.form()
+        try:
+            await queries.save_settings(deps.db, _numbers(form, RECOMMEND_NUMBERS))
+        except queries.SettingsError as e:
+            return back(request, "/behaviour#recommend", f"Not saved: {e}", "error")
+        return back(request, "/behaviour#recommend", "Recommendation settings saved.")
 
     # --- ambient (§10.2) & harvester (§10.4) -------------------------------------------------
 
