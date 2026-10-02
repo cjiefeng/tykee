@@ -15,6 +15,7 @@ from pydantic import ValidationError
 
 from app.brain import index
 from app.db.database import Database
+from app.db.repos import usage as usage_repo
 from app.settings import RuntimeSettings, set_value
 from app.timeutil import local_day_start, local_month_start, to_sql
 
@@ -67,6 +68,7 @@ class Spend:
     month: float
     calls_today: int
     by_purpose: list[tuple[str, int, float]]
+    searches_today: int = 0
 
 
 async def spend(db: Database, now: datetime, tz: ZoneInfo) -> Spend:
@@ -85,9 +87,16 @@ async def spend(db: Database, now: datetime, tz: ZoneInfo) -> Spend:
             "GROUP BY purpose ORDER BY 3 DESC",
             (month,),
         ).fetchall()
-        return Spend(float(today), float(m), int(calls), [(r[0], r[1], float(r[2])) for r in by])
+        by_purpose = [(r[0], r[1], float(r[2])) for r in by]
+        searches = usage_repo.web_searches_since(c, day)
+        return Spend(float(today), float(m), int(calls), by_purpose, searches)
 
     return await db.read(_q)
+
+
+async def web_searches_today(db: Database, now: datetime, tz: ZoneInfo) -> int:
+    day = to_sql(local_day_start(now, tz))
+    return await db.read(lambda c: usage_repo.web_searches_since(c, day))
 
 
 async def counts(db: Database, now: datetime, tz: ZoneInfo) -> dict[str, Any]:

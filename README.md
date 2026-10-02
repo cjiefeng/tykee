@@ -140,10 +140,10 @@ loop, and update `docs/design.md` in the same commit as any behaviour change.
 | M2 ✅ | Decision engine: dynamic categories, weighted non-repeating picks, buttons, feedback learning |
 | M2b ✅ | Ambient participation: decides when to speak in the group, `/quiet` |
 | M3 ✅ | Second brain: notes, local embeddings, hybrid search, memory tools, inbox |
-| M4 | Dashboard, plus forum topics (read every topic, answer in one) |
-| M5 | Bootstrap import from 6 months of Telegram chat history |
-| M6 | Scheduled nudges, backups, healthcheck, runbook |
-| M7 | Web search and fetch, with cited answers |
+| M4 ✅ | Dashboard, plus forum topics (read every topic, answer in one) |
+| M5 ✅ | Bootstrap import from 6 months of Telegram chat history |
+| M6 ✅ | Scheduled nudges, backups, healthcheck, runbook |
+| M7 ✅ | Web search and fetch, with cited answers |
 
 Details and acceptance criteria are in design §16.
 

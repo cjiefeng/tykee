@@ -297,6 +297,43 @@ async def test_persona_history_and_restore(dash: Dash, env: Env) -> None:
     assert (await env.settings.load()).persona_system_prompt == original
 
 
+async def test_web_settings(dash: Dash, env: Env) -> None:
+    await dash.login()
+    page = (await dash.client.get("/behaviour")).text
+    assert "0 of 50 searches used today" in page and "<strong>On.</strong>" in page
+
+    await dash.post(
+        "/behaviour/web",
+        {
+            "web.enabled": "on",
+            "web.daily_search_cap": "20",
+            "web.fetch_max_uses": "0",
+            "pricing.web_search": "0.02",
+            "web.user_location.city": "Singapore",
+            "web.user_location.country": "SG",
+            "web.allowed_domains": "eatbook.sg\nsethlui.com",
+            "web.blocked_domains": "",
+        },
+    )
+    s = await env.settings.load()
+    assert (s.web_enabled, s.web_daily_search_cap, s.web_fetch_max_uses) == (True, 20, 0)
+    assert s.pricing_web_search == 0.02
+    assert s.web_allowed_domains == ["eatbook.sg", "sethlui.com"]
+    assert s.web_user_location is not None and s.web_user_location.timezone is None
+
+    await dash.post(
+        "/behaviour/web",
+        {"web.allowed_domains": "a.com", "web.blocked_domains": "b.com"},
+    )
+    assert "not both" in await dash.flash("/behaviour")
+    assert (await env.settings.load()).web_enabled  # nothing saved
+
+    await dash.post("/behaviour/web", {})  # unchecked box → off, location cleared
+    s = await env.settings.load()
+    assert not s.web_enabled and s.web_user_location is None
+    assert "<strong>Off.</strong>" in (await dash.client.get("/behaviour")).text
+
+
 async def test_ambient_settings_and_harvest_now(dash: Dash, env: Env) -> None:
     await dash.login()
     await dash.post(

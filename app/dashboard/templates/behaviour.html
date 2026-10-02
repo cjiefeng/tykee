@@ -30,4 +30,30 @@
   Embedding precision (<code>embedding.precision</code>) applies after a restart.</p>
   <div class="actions"><button class="primary">Save</button></div>
 </form>
+
+<h2 id="web">Web</h2>
+<p class="lede">Live web search and page fetches on replies (not on the judge, summaries or import).
+  {% if web_status.on %}<strong>On.</strong>
+  {% elif web_status.reason == 'daily_cap' %}<strong>Paused:</strong> daily search cap reached; back after midnight.
+  {% elif web_status.reason == 'budget' %}<strong>Paused:</strong> spend is past the budget warn ratio.
+  {% else %}<strong>Off.</strong>{% endif %}
+  {{ searches_today }} of {{ s.web_daily_search_cap }} searches used today.</p>
+<form method="post" action="/behaviour/web" class="form-panel">{{ csrf_input }}
+  <label class="check"><input type="checkbox" name="web.enabled" {{ 'checked' if s.web_enabled }}> Web search and fetch enabled</label>
+  <div class="row">
+    {% for key in web_numbers %}<div><label for="w-{{ loop.index }}">{{ key }}</label><input id="w-{{ loop.index }}" type="number" step="any" min="0" name="{{ key }}" value="{{ raw.get(key, '') }}"></div>{% endfor %}
+  </div>
+  <div class="row">
+    {% set loc = s.web_user_location %}
+    {% for f in ['city', 'region', 'country', 'timezone'] %}<div><label for="wl-{{ f }}">location {{ f }}</label><input id="wl-{{ f }}" type="text" name="web.user_location.{{ f }}" value="{{ (loc[f] if loc else None) or '' }}"></div>{% endfor %}
+  </div>
+  <div class="row">
+    <div><label for="w-allow">web.allowed_domains (one per line)</label><textarea id="w-allow" name="web.allowed_domains">{{ s.web_allowed_domains | join('\n') }}</textarea></div>
+    <div><label for="w-block">web.blocked_domains (one per line)</label><textarea id="w-block" name="web.blocked_domains">{{ s.web_blocked_domains | join('\n') }}</textarea></div>
+  </div>
+  <p class="help">Set allowed or blocked domains, not both. Country is a two-letter code (SG).
+  <code>pricing.web_search</code> is USD per search; <code>web.fetch_max_uses</code> 0 turns fetching off.
+  Tool versions are in <a href="/settings">Settings</a> (<code>web.tool_versions</code>). Facts found on the web always go to the memory inbox.</p>
+  <div class="actions"><button class="primary">Save web settings</button></div>
+</form>
 {% endblock %}
