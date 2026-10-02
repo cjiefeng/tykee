@@ -23,6 +23,7 @@ from app.db.repos.users import UserRecord
 from app.decisions.categories import Category
 from app.decisions.engine import ExtraCandidate, PickRequest
 from app.decisions.service import DecisionService
+from app.orchestrator.escalation import Tier
 from app.places import attributes as attrs
 from app.places import pets as pets_mod
 from app.places.recommend import (
@@ -543,6 +544,8 @@ class TurnContext:
     web_used: bool = False  # a web search/fetch ran this turn → memory writes need approval (§7.5)
     web_on: bool = False  # web tools offered this turn (find_places may leave slots for the web)
     recommend: TurnState | None = None  # the turn's find_places, for save_place_candidates
+    tier: Tier = "default"  # §7.1 model tier for this turn's calls
+    max_tokens: int | None = None  # None → llm.max_tokens; escalation.max_tokens when escalated
 
 
 @dataclass(frozen=True)

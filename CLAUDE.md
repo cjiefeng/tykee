@@ -49,6 +49,9 @@ All tooling runs inside Docker (no local Python/uv needed).
 - `app/orchestrator/`: prompt assembly (§7.2), history replay, Claude tool loop (max 6
   iterations, then `tool_choice: none`), tool schemas + router in `tools.py`, fallback (§8.5),
   rolling chat summaries (`summary.py`, background, one run per chat at a time).
+  `escalation.py` (§7.1, pure): reply model tier from `/think` (`models.escalated`),
+  `/thinkharder` (`models.deep`), `escalation.*` phrases and message length; the orchestrator
+  drops to the default tier past the budget warn ratio and for unprompted replies.
   `web.py` (§7.5): web search/fetch server tools, gate (switch → daily search cap → budget
   warn ratio), result readers; web-assisted turns can only propose memories, never write notes.
 - `app/brain/`: second brain (§6). `notes.py` (pure: paths, frontmatter, edit modes, chunking,

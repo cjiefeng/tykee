@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **Status** | Draft v1.32 (M10 as built: read-only account reader with resolve/log-out on the wrapper, first poll sets a starting point, immediate harvest after a poll, Backfill as a generated export into the import wizard, §10.7) |
+| **Status** | Draft v1.33 (reply escalation built: `/think` and phrases → Sonnet-tier, `/thinkharder` and "think even harder" → Opus-tier, §7.1). Earlier: v1.32 (M10 as built: read-only account reader with resolve/log-out on the wrapper, first poll sets a starting point, immediate harvest after a poll, Backfill as a generated export into the import wizard, §10.7) |
 | **Name** | Tykee: phonetic spelling of Tyche, the Greek goddess of chance. Telegram handle e.g. `@TykeeBot` (must end in "bot") |
 | **Author** | Jack |
 | **Date** | 2026-10-01 |
@@ -517,7 +517,7 @@ Identical ranks on every query (same two rank-2/rank-4 misses for both). **int8 
 
 | Component | API | Default tier | Section |
 |---|---|---|---|
-| Orchestrator (replies, tool use, memory proposals) | Messages API, tool use, prompt caching | Haiku-tier, escalates to Sonnet-tier | §7.1–7.4 |
+| Orchestrator (replies, tool use, memory proposals) | Messages API, tool use, prompt caching | Haiku-tier, escalates to Sonnet-tier or Opus-tier when asked | §7.1–7.4 |
 | Speak-or-stay-silent judge | Messages API, structured JSON output, prompt caching | Haiku-tier | §10.2 |
 | Chat history summaries | Messages API | Haiku-tier | §7.2 |
 | Bootstrap import: extraction | **Message Batches API** (async, discounted) | **Opus-tier** (one-off; quality sets the bot's day-one memory) | §15.3 |
@@ -537,10 +537,13 @@ Client rules:
 | Task | Default tier | Notes |
 |---|---|---|
 | Normal chat & decisions | Haiku-tier | Cheap, fast; most traffic. |
-| Complex / multi-constraint planning (e.g. "plan our Saturday") | Sonnet-tier | Escalated by keyword/length heuristic or a `/think` command. |
+| Complex / multi-constraint planning (e.g. "plan our Saturday") | Sonnet-tier (`models.escalated`) | `/think <question>`, a phrase in `escalation.think_phrases` ("think hard", "help us plan", …), or a message of at least `escalation.long_message_chars` (600; 0 = off). |
+| The big ones ("think even harder") | Opus-tier (`models.deep`) | `/thinkharder <question>`, or a phrase in `escalation.deep_phrases` ("think even harder", "think harder", …; checked before the think phrases, and also lifts a `/think`). |
 | History summarisation | Haiku-tier | Background. |
 
-Model IDs live in `settings` (`models.default`, `models.escalated`), never hardcoded.
+Model IDs live in `settings` (`models.default`, `models.escalated`, `models.deep`), never hardcoded; an empty `models.deep` falls back to `models.escalated`.
+
+**As built (v1.33):** `app/orchestrator/escalation.py` picks the tier in code (whole-phrase, case-insensitive match; no extra LLM call). Every call of that turn's tool loop uses the tier's model, `escalation.max_tokens` (1200) instead of `llm.max_tokens`, a 90 s timeout, and a line in the dynamic context asking for a fuller, weighed answer (randomness still comes only from `random_pick`). The commands always work; `escalation.enabled` switches the phrase and length triggers. Unprompted (ambient) replies always use the default tier, and so does everything once spend passes `budget.warn_ratio`, so asking for Opus can't run the budget out. No extended thinking yet: with tool use it would mean replaying thinking blocks inside the tool loop. Settings live on Behaviour.
 
 ### 7.2 Prompt assembly (in cache-friendly order)
 
@@ -751,7 +754,7 @@ User taps ✅ → callback → status='accepted', pref update, log note appended
   Claude can override the default `for_users` when context is clear; the default only applies when ambiguous.
 - **Formatting:** `parse_mode=HTML`. Claude writes plain text with a minimal markdown subset (`**bold**`, `_italic_`, `[text](url)`); code escapes `<`, `>`, `&`, converts that subset to HTML and splits at 4096 chars on the plain text first, so tags are always balanced. Claude never emits HTML.
 - **Single poller:** exactly one replica; a second instance causes `409 Conflict` from `getUpdates`. Compose `deploy.replicas` not used; documented in runbook.
-- **Commands:** `/pick <category>`, `/options <category>`, `/remember <text>`, `/forget <text>`, `/think <question>`, `/quiet [duration]`, `/unquiet`, `/inbox` (admin, M3: review pending memories), `/settopic` (admin, M4: make this topic the answer topic, §10.4), `/help`. `/remember` and `/forget` are passed to Claude as ordinary messages; the rules tell it to use `write_note`.
+- **Commands:** `/pick <category>`, `/options <category>`, `/remember <text>`, `/forget <text>`, `/think <question>` (Sonnet-tier, §7.1), `/thinkharder <question>` (Opus-tier), `/quiet [duration]`, `/unquiet`, `/inbox` (admin, M3: review pending memories), `/settopic` (admin, M4: make this topic the answer topic, §10.4), `/help`. `/remember` and `/forget` are passed to Claude as ordinary messages; the rules tell it to use `write_note`.
 
 ### 10.1 Seeing all group messages
 
@@ -1405,7 +1408,7 @@ All settings are read from SQLite on each request, so changes apply instantly wi
 - **Restart needed for:** user display names/timezones (users are loaded at startup) and `embedding.precision`.
 - **Budget:** tiles turn amber at `budget.warn_ratio` (0.8) and red at 100%. When a reply hits the cap, the admin gets one Telegram DM per household day (§14.4).
 - **Visual system (refreshed in M5):** one stylesheet (`static/app.css`) built on semantic tokens with light and dark values (follows the OS setting), system fonts (works offline), one accent colour, green/amber/red only for state and always with text. Sidebar navigation grouped Decisions / Memory / Admin at 1024px and wider, a scrolling nav strip below that; wide tables scroll inside their panel on phones. Skip link, visible focus rings, announced flash messages, 44px touch targets on touch screens, reduced motion respected. No emoji as icons.
-- **Not built in M4:** the `/think` escalation heuristic (§7.1) has no dashboard control because it doesn't exist yet; `models.escalated` is editable for when it does. Backups arrived in M6 (§14.2); the Import page arrived in M5 (§15.6).
+- **Not built in M4:** the `/think` escalation (§7.1), built in v1.33 with its settings on Behaviour. Backups arrived in M6 (§14.2); the Import page arrived in M5 (§15.6).
 
 ---
 

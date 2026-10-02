@@ -55,8 +55,13 @@ It runs as one Python 3.12 asyncio process with SQLite, in a single Docker conta
   Thai" on weekdays at 17:30. No Claude call needed.
 - **If Claude is unavailable** or the budget cap is reached, it falls back to a plain random pick.
 
-Commands: `/pick`, `/options`, `/remember`, `/forget`, `/think`, `/quiet`, `/unquiet`, `/inbox`,
-`/settopic`, `/help` (see design §10).
+- **Thinking harder:** replies normally use Haiku. `/think <question>` (or saying "think hard",
+  "help us plan", or a long message) answers with Sonnet; `/thinkharder` (or "think even harder")
+  with Opus. The phrases are editable on the dashboard's Behaviour page; past 80% of the budget
+  it always uses the default model.
+
+Commands: `/pick`, `/options`, `/remember`, `/forget`, `/think`, `/thinkharder`, `/quiet`,
+`/unquiet`, `/inbox`, `/settopic`, `/help` (see design §10).
 
 ## Architecture
 

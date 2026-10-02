@@ -18,7 +18,15 @@ from app.timeutil import utcnow
 PERSONA_HISTORY = "persona.history"
 PERSONA_HISTORY_MAX = 20
 
-MODEL_ROLES = ["default", "escalated", "judge", "harvest", "import_extract", "import_consolidate"]
+MODEL_ROLES = [
+    "default",
+    "escalated",
+    "deep",
+    "judge",
+    "harvest",
+    "import_extract",
+    "import_consolidate",
+]
 BEHAVIOUR_NUMBERS = {
     "history.max_turns": int,
     "llm.max_tokens": int,
@@ -29,8 +37,11 @@ BEHAVIOUR_NUMBERS = {
     "memory.search_k": int,
     "memory.pinned_max_chars": int,
     "summary.batch": int,
+    "escalation.long_message_chars": int,
+    "escalation.max_tokens": int,
 }
-BEHAVIOUR_TOGGLES = ["memory.auto_approve"]
+BEHAVIOUR_TOGGLES = ["memory.auto_approve", "escalation.enabled"]
+ESCALATION_LISTS = ["escalation.think_phrases", "escalation.deep_phrases"]
 WEB_NUMBERS = {
     "web.search_max_uses": int,
     "web.fetch_max_uses": int,
@@ -130,6 +141,10 @@ def register(router: APIRouter, deps: DashboardDeps) -> None:
                 value = form.get(f"models.{role}")
                 if isinstance(value, str) and value.strip():
                     changes[f"models.{role}"] = value.strip()
+            for key in ESCALATION_LISTS:
+                raw = form.get(key)
+                if isinstance(raw, str):
+                    changes[key] = [p.strip() for p in raw.splitlines() if p.strip()]
             await queries.save_settings(deps.db, changes)
         except queries.SettingsError as e:
             return back(request, "/behaviour", f"Not saved: {e}", "error")
