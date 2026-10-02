@@ -46,9 +46,11 @@ It runs as one Python 3.12 asyncio process with SQLite, in a single Docker conta
   the answer topic records the decision and gets a quiet 👌 reaction instead of a reply, so "where
   are we eating?" answers with the shop name and link.
 - **Place recommendations:** "brunch around Tiong Bahru, pet friendly" picks from places you know,
-  ranked and chosen in code, plus new ones found on the web when there aren't enough. Each pick
-  says where its pet info comes from ("you confirmed" vs "per website, call ahead"), with a Map link
-  and [✅ 1] [✅ 2] [✅ 3] [🎲 more] buttons. "Near home" uses a neighbourhood you set, never an address.
+  ranked and chosen in code, plus new ones found on the web when there aren't enough. Must-haves
+  (pet-friendly, kid-friendly, halal, aircon, quiet) show where the info comes from ("you confirmed"
+  vs "per website, call ahead"). Each pick has a Map link, and [✅ 1] [✅ 2] [✅ 3] [🎲 more] buttons
+  settle it in one tap. Pets you add in the dashboard are taken into account. "Near home" uses a
+  neighbourhood you set, never an address.
 - **Scheduled nudges** (off by default) can post a pick at a set time, e.g. "Dinner? I'm thinking
   Thai" on weekdays at 17:30. No Claude call needed.
 - **If Claude is unavailable** or the budget cap is reached, it falls back to a plain random pick.
@@ -136,6 +138,76 @@ Only one instance may run at a time. A second poller gets `409 Conflict` from Te
 
 Backups (nightly SQLite copies plus a local git commit of the vault), restore, healthcheck and other
 operations are covered in the [runbook](docs/runbook.md).
+
+### 5. Optional: account reader (M10)
+
+> Planned in M10 (design §10.7). Set this up only once M10 is built.
+
+The account reader logs in **as you** (read-only) to learn decisions from chats the bot isn't in,
+such as your DM with your partner. It needs three values in `.env`, plus a one-time login.
+
+#### 5a. `TG_API_ID` and `TG_API_HASH` (from Telegram)
+
+1. Go to <https://my.telegram.org> and log in with **your** phone number. The code arrives in your
+   Telegram app, not by SMS.
+2. Click **API development tools**.
+3. Fill in "Create new application":
+   - App title: `Tykee Reader`
+   - Short name: `tykeereader` (5–32 letters/numbers)
+   - Platform: `Desktop`
+   - URL and description: leave blank, or "personal read-only reader"
+4. Click **Create application**. Copy:
+   - **App api_id** (a number) → `TG_API_ID`
+   - **App api_hash** (32 hex characters) → `TG_API_HASH`
+
+Notes:
+- Each account gets one app. Revisiting the page later shows the same values.
+- If creation fails with a plain "ERROR", it's usually a VPN, ad-blocker or browser issue. Try
+  another browser with them off.
+- Treat the hash like a password. It can't log in on its own, but don't share it.
+
+#### 5b. `READER_SESSION_KEY` (you generate it)
+
+This key encrypts the saved Telegram login. It must be a Fernet key (32 random bytes, URL-safe
+base64, 44 characters). Generate it with either:
+
+```bash
+python3 -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+# or, without Python packages:
+openssl rand -base64 32 | tr '+/' '-_'
+```
+
+#### 5c. Add them to `.env`
+
+```env
+TG_API_ID=12345678
+TG_API_HASH=0123456789abcdef0123456789abcdef
+READER_SESSION_KEY=q3V9x...Zk8=
+```
+
+- Keep `.env` next to `compose.yaml`, **not** inside the data directory, so the key never ends up
+  in backups. Backups then never contain a usable login.
+- `chmod 600 .env`.
+- Save a copy of `READER_SESSION_KEY` in your password manager.
+
+#### 5d. Log in once, on the server
+
+```bash
+docker exec -it tykee python -m app.reader.login
+```
+
+It asks for your phone number, the login code and your 2FA password (never stored), then saves the
+encrypted session. In Telegram → Settings → Devices it shows up as **"Tykee reader (read-only)"**.
+
+Then, in the dashboard (System → Account reader), add the chats Tykee may read and tick each
+chat's consent box. Nothing is read until both are done.
+
+#### Lost key or want to revoke access
+
+- **Lost key:** the saved session can't be decrypted, but nothing else breaks. Generate a new key,
+  run the login again, and remove the old "Tykee reader" entry under Telegram → Settings → Devices.
+- **Revoke:** press **Disconnect** in the dashboard, or terminate "Tykee reader (read-only)" from
+  Telegram → Settings → Devices on any phone. The reader disables itself and alerts you.
 
 ## Development
 
