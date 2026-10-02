@@ -25,12 +25,29 @@ from tests.conftest import (
     url_entities,
 )
 from tests.fakes.fake_llm import FakeLLMClient, tool_call
-from tests.unit.test_place_links import HOME_Q, PLACE_PAGE, SHARED_Q
+from tests.unit.test_place_links import (
+    HOME_Q,
+    PLACE_PAGE,
+    SHARE,
+    SHARE_HOP,
+    SHARE_NOT_PLACE,
+    SHARE_SEARCH,
+    SHARED_Q,
+)
 
 ANSWER, FOOD = 5, 9
 SHORT = "https://maps.app.goo.gl/AbC123xyz"
 HOME = "https://maps.app.goo.gl/HoMe999"
-REDIRECTS = {SHORT: SHARED_Q, HOME: HOME_Q}
+OTHER_SHARE = "https://share.google/NotAPlace1"
+OTHER_HOP = "https://www.google.com/share.google?q=NotAPlace1"
+REDIRECTS = {
+    SHORT: SHARED_Q,
+    HOME: HOME_Q,
+    SHARE: SHARE_HOP,
+    SHARE_HOP: SHARE_SEARCH,
+    OTHER_SHARE: OTHER_HOP,
+    OTHER_HOP: SHARE_NOT_PLACE,
+}
 
 
 async def setup(env: Env, *replies: Any, dinner: bool = True) -> Stack:
@@ -140,6 +157,29 @@ async def test_home_link_is_never_stored(env: Env) -> None:
     links_ = await rows(env, "SELECT url, status, final_url FROM place_links")
     assert [tuple(r) for r in links_] == [(HOME, "unnamed", None)]
     assert not (env.vault / "shared" / "places").exists()
+
+
+async def test_share_google_link_is_a_place_and_dedupes_with_maps(env: Env) -> None:
+    stack = await setup(env)
+    msg_id = await say(stack, env, f"eating here {SHARE}", SHARE)
+    assert stack.gateway.reactions == [(GROUP_ID, msg_id, "👌")]
+    (place,) = await rows(env, "SELECT * FROM places")
+    assert place["name"] == "Keisuke Tonkotsu King" and place["google_id"] == "kgmid:/g/11c1q9t9qv"
+    assert place["maps_url"] == SHARE and place["lat"] is None
+    (stored,) = await stored_texts(env)
+    assert stored.startswith(f"eating here {SHARE} ⟦place: Keisuke Tonkotsu King")
+
+    # The same shop shared later as a Maps link: same name, no coordinates to tell them apart.
+    await say(stack, env, f"this one {SHORT}", SHORT, topic=FOOD)
+    (merged,) = await rows(env, "SELECT * FROM places")
+    assert merged["id"] == place["id"] and merged["address"] is not None
+
+    # A share of something that isn't a location: left alone, cached as not_place.
+    await say(stack, env, f"watch this {OTHER_SHARE}", OTHER_SHARE, topic=FOOD)
+    assert len(await rows(env, "SELECT * FROM places")) == 1
+    assert (await stored_texts(env))[-1] == f"watch this {OTHER_SHARE}"
+    (row,) = await rows(env, "SELECT status FROM place_links WHERE url = ?", OTHER_SHARE)
+    assert row["status"] == "not_place"
 
 
 # --- intent split over two messages, no intent, other topics -----------------------------------
