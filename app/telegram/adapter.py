@@ -27,6 +27,7 @@ from app.db.repos.users import UserRecord
 from app.decisions.engine import PickRequest
 from app.decisions.service import DecisionService
 from app.health import HealthState
+from app.orchestrator import escalation
 from app.orchestrator.orchestrator import (
     ChatContext,
     Orchestrator,
@@ -66,6 +67,8 @@ In the group, mention me or reply to one of my messages. In a DM, just talk to m
 Commands:
 /pick <category>: random pick from saved options (e.g. /pick dinner)
 /options <category>: list saved options
+/think <question>: answer with a stronger model (Sonnet). Or just say "think hard"
+/thinkharder <question>: the strongest model (Opus), for the big ones. Or say "think even harder"
 /remember <fact>: save something to memory
 /forget <fact>: remove something from memory
 /inbox: review memories waiting for approval (admin)
@@ -212,12 +215,17 @@ class TelegramAdapter:
             self._ambient.cancel(chat_id)
         log.info("addressed", extra={"chat_id": chat_id, "user": actor.slug, "group": is_group})
         chat = ChatContext(chat_id, is_group, thread=await self._history_thread(chat_id, is_group))
-        if cmd is not None and cmd.name not in ("remember", "forget"):
+        forced = escalation.COMMANDS.get(cmd.name) if cmd is not None else None
+        if forced is not None and cmd is not None and not cmd.args.strip():
+            await self._send(chat_id, f"Usage: /{cmd.name} <question>", store=False, thread=thread)
+            return
+        if cmd is not None and forced is None and cmd.name not in ("remember", "forget"):
             await self._command(cmd, msg, chat, actor, thread)
             return
         # /remember and /forget go to Claude as-is; the rules tell it to use write_note.
+        # /think and /thinkharder too, on a stronger model (§7.1).
         async with self._gateway.typing(chat_id, send_thread(thread)):
-            reply = await self._orchestrator.respond(chat, actor, text)
+            reply = await self._orchestrator.respond(chat, actor, text, tier=forced)
         if self._places is not None:
             await self._places.confirm(chat_id, reply.recorded, msg.message_id)
         if reply.text:

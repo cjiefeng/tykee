@@ -55,8 +55,13 @@ It runs as one Python 3.12 asyncio process with SQLite, in a single Docker conta
   Thai" on weekdays at 17:30. No Claude call needed.
 - **If Claude is unavailable** or the budget cap is reached, it falls back to a plain random pick.
 
-Commands: `/pick`, `/options`, `/remember`, `/forget`, `/think`, `/quiet`, `/unquiet`, `/inbox`,
-`/settopic`, `/help` (see design §10).
+- **Thinking harder:** replies normally use Haiku. `/think <question>` (or saying "think hard",
+  "help us plan", or a long message) answers with Sonnet; `/thinkharder` (or "think even harder")
+  with Opus. The phrases are editable on the dashboard's Behaviour page; past 80% of the budget
+  it always uses the default model.
+
+Commands: `/pick`, `/options`, `/remember`, `/forget`, `/think`, `/thinkharder`, `/quiet`,
+`/unquiet`, `/inbox`, `/settopic`, `/help` (see design §10).
 
 ## Architecture
 
@@ -141,8 +146,6 @@ operations are covered in the [runbook](docs/runbook.md).
 
 ### 5. Optional: account reader (M10)
 
-> Planned in M10 (design §10.7). Set this up only once M10 is built.
-
 The account reader logs in **as you** (read-only) to learn decisions from chats the bot isn't in,
 such as your DM with your partner. It needs three values in `.env`, plus a one-time login.
 
@@ -199,8 +202,17 @@ docker exec -it tykee python -m app.reader.login
 It asks for your phone number, the login code and your 2FA password (never stored), then saves the
 encrypted session. In Telegram → Settings → Devices it shows up as **"Tykee reader (read-only)"**.
 
-Then, in the dashboard (System → Account reader), add the chats Tykee may read and tick each
-chat's consent box. Nothing is read until both are done.
+Then, in the dashboard (System → Account reader):
+
+1. Turn the reader **on**.
+2. Add the chats Tykee may read (a `@username`, numeric id, `t.me` link, or **Pick from my
+   chats**). Adding needs your dashboard password again, and the bot DMs you about it.
+3. Tick each chat's consent box (password again).
+
+Nothing is read until all three are done. The first poll only notes where to start; after that,
+new messages are fetched every 30 minutes per chat (changeable) and harvested right away. To
+learn from older history, press **Backfill**: it pulls up to 6 months into the Import wizard,
+with the usual cost preview and review.
 
 #### Lost key or want to revoke access
 
@@ -246,7 +258,7 @@ loop, and update `docs/design.md` in the same commit as any behaviour change.
 | M7 ✅ | Web search and fetch, with cited answers |
 | M8 ✅ | Google Maps links → places: resolve pasted links to a named shop (no API, no LLM), record "eating here" as a decision, never store home addresses |
 | M9 ✅ | Place recommendations: "brunch around Tiong Bahru, pet friendly" picks from known places plus web discovery, with must-have filters and a source for each attribute (you confirmed vs. per website) |
-| M10 | Read-only account reader: learns decisions and preferences from chats the bot isn't in (starting with the Jack ↔ partner DM) via Jack's account. Strictly read-only; which chats it may read is picked in the dashboard, each with its own consent; one-click Disconnect |
+| M10 ✅ | Read-only account reader: learns decisions and preferences from chats the bot isn't in (starting with the Jack ↔ partner DM) via Jack's account. Strictly read-only; which chats it may read is picked in the dashboard, each with its own consent; one-click Disconnect |
 
 Details and acceptance criteria are in design §16.
 
@@ -258,7 +270,7 @@ are computed locally. The dashboard is LAN-only, with no port forwarding.
 Tykee doesn't use the Google Maps or Places API: place info comes from pasted links, chat and web
 search, and home addresses are never stored.
 
-The planned M10 account reader will log in as Jack and read only the chats on an allowlist managed
+The M10 account reader logs in as Jack and reads only the chats on an allowlist managed
 in the dashboard. Each chat needs a recorded consent, and adding one requires re-entering the admin
 password and triggers a Telegram alert to the admin. The reader can't send, react or mark messages
 as read. The session is encrypted with a key kept out of backups, and raw chat text is deleted after

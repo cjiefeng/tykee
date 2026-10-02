@@ -26,13 +26,17 @@ from app.db.repos.users import UserRecord
 from app.decisions.engine import PickRequest
 from app.decisions.service import DecisionService
 from app.llm.client import (
+    INTERACTIVE_TIMEOUT_S,
     BudgetExceeded,
     LLMBadRequest,
     LLMClient,
     LLMError,
     LLMRequest,
     LLMResponse,
+    budget_status,
 )
+from app.orchestrator import escalation
+from app.orchestrator.escalation import Tier
 from app.orchestrator.history import build_messages
 from app.orchestrator.prompt import build_system, dynamic_context
 from app.orchestrator.summary import Summarizer
@@ -47,12 +51,13 @@ from app.orchestrator.web import (
 )
 from app.places.recommend import RecommendService
 from app.places.service import PlaceService
-from app.settings import SettingsStore
+from app.settings import RuntimeSettings, SettingsStore
 from app.timeutil import utcnow
 
 log = logging.getLogger(__name__)
 
 MAX_TOOL_ITERATIONS = 6
+DEEP_TIMEOUT_S = 90.0  # Sonnet/Opus-tier replies write more and take longer (§7.1)
 FALLBACK_OFFLINE = "My brain's offline right now 🤕"
 FALLBACK_BUDGET = "I've hit my spending cap for now 💸"
 FALLBACK_EMPTY = "🤔"
@@ -76,6 +81,7 @@ class Reply:
     budget_exhausted: bool = False  # §14.4: the adapter DMs the admin once a day
     recorded: list[tuple[int, int | None]] = field(default_factory=list)  # → reaction (§10.5)
     recommendation: bool = False  # picks are find_places picks: [✅ 1] [✅ 2] … [🎲 more]
+    tier: Tier = "default"  # §7.1: the model tier that answered
 
 
 def assistant_blocks(content: Sequence[ContentBlock]) -> list[ContentBlockParam]:
@@ -135,16 +141,42 @@ class Orchestrator:
         text: str,
         *,
         unprompted_reason: str | None = None,
+        tier: Tier | None = None,
     ) -> Reply:
-        """``unprompted_reason`` is set when the ambient judge (§10.2) decided to step in."""
+        """``unprompted_reason`` is set when the ambient judge (§10.2) decided to step in.
+        ``tier`` forces a model tier (``/think``, ``/thinkharder``, §7.1)."""
         try:
-            return await self._respond(chat, actor, text, unprompted_reason)
+            return await self._respond(chat, actor, text, unprompted_reason, tier)
         finally:
             if self._summarizer is not None:
                 self._summarizer.schedule(chat.chat_id)
 
+    async def _tier(
+        self, text: str, s: RuntimeSettings, forced: Tier | None, unprompted: bool
+    ) -> escalation.Choice:
+        """§7.1. Unprompted (ambient) replies stay on the default tier; past the budget warn
+        ratio everything does, so a "think harder" can't push spend over the cap."""
+        if unprompted:
+            return escalation.Choice("default", "default")
+        choice = escalation.choose(text, s, forced)
+        if choice.tier == "default":
+            return choice
+        st = await budget_status(self._db, s, self._tz)
+        if (
+            st.daily_spent >= s.budget_warn_ratio * st.daily_cap
+            or st.monthly_spent >= s.budget_warn_ratio * st.monthly_cap
+        ):
+            log.warning("escalation skipped: budget above warning level")
+            return escalation.Choice("default", "budget")
+        return choice
+
     async def _respond(
-        self, chat: ChatContext, actor: UserRecord, text: str, unprompted_reason: str | None
+        self,
+        chat: ChatContext,
+        actor: UserRecord,
+        text: str,
+        unprompted_reason: str | None,
+        forced: Tier | None = None,
     ) -> Reply:
         s = await self._settings.load()
         rows = await self._db.read(
@@ -189,11 +221,17 @@ class Orchestrator:
                     web_paused=web.temporarily_off,
                     today=today,
                     pets=pets,
+                    think=ctx.tier != "default",
                 ),
                 pinned=pinned,
                 web=web_on,
             )
 
+        choice = await self._tier(text, s, forced, unprompted_reason is not None)
+        ctx.tier = choice.tier
+        ctx.max_tokens = None if choice.tier == "default" else s.escalation_max_tokens
+        if choice.tier != "default" or choice.reason == "budget":
+            log.info("reply tier", extra={"tier": choice.tier, "reason": choice.reason})
         tools: list[ToolUnionParam] = [*self._tools.definitions()]
         try:
             try:
@@ -233,6 +271,7 @@ class Orchestrator:
             picks=ctx.last_picks,
             recorded=ctx.recorded,
             recommendation=ctx.recommend is not None and bool(ctx.last_picks),
+            tier=ctx.tier,
         )
 
     async def _loop(
@@ -247,13 +286,15 @@ class Orchestrator:
             resp = await self._llm.complete(
                 LLMRequest(
                     purpose="chat",
-                    model_role="default",
+                    model_role=ctx.tier,
                     system=system,
                     messages=messages,
+                    max_tokens=ctx.max_tokens,
                     tools=tools,
                     tool_choice={"type": "none"} if last else None,
                     user_id=ctx.actor.id,
                     chat_id=ctx.chat_id,
+                    timeout_s=INTERACTIVE_TIMEOUT_S if ctx.tier == "default" else DEEP_TIMEOUT_S,
                 )
             )
             await self._note_web(resp, ctx)

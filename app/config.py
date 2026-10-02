@@ -55,6 +55,11 @@ class Env(BaseSettings):
     embed_baked_dir: Path = Path("/app/models")  # model files baked into the image at build
     log_level: str = "INFO"
     tz: str = "UTC"
+    # §10.7 account reader: my.telegram.org app + the key that encrypts the saved login. The key
+    # stays out of /data, so backups never hold a usable session.
+    tg_api_id: int | None = None
+    tg_api_hash: str = ""
+    reader_session_key: str = ""
 
     @field_validator("allowed_telegram_ids")
     @classmethod
@@ -78,6 +83,14 @@ class Env(BaseSettings):
     @property
     def dashboard_enabled(self) -> bool:
         return dashboard_configured(self.dashboard_password_hash, self.session_secret)
+
+    @property
+    def reader_configured(self) -> bool:
+        return bool(self.tg_api_id and self.tg_api_hash and self.reader_session_key)
+
+    @property
+    def reader_session_path(self) -> Path:
+        return self.data_dir / "reader.session.enc"
 
     @property
     def db_path(self) -> Path:

@@ -1,0 +1,77 @@
+{% extends "base.html" %}
+{% block title %}Account reader{% endblock %}
+{% block content %}
+<a class="crumb" href="/system">System</a>
+<div class="page-head"><div><h1>Account reader</h1>
+  <p class="lede">Reads chats the bot isn't in (like your DM with each other) <b>as you, read-only</b>, so the harvester can learn decisions and preferences from them. It can't send, react or mark anything as read, and it only reads chats on this list that have consent.</p></div>
+  {% if reader and reader.logged_in %}<div class="actions">
+    <form method="post" action="/system/reader/disconnect" onsubmit="return confirm('Log the reader out of Telegram and delete the saved session?')">{{ csrf_input }}<button class="danger">Disconnect</button></form>
+  </div>{% endif %}
+</div>
+
+{% if not reader or not reader.configured %}
+<div class="callout">Not configured. Set <code>TG_API_ID</code>, <code>TG_API_HASH</code> and <code>READER_SESSION_KEY</code> in <code>.env</code> (see the README), redeploy, then log in once on the NAS: <code>docker exec -it tykee python -m app.reader.login</code>.</div>
+{% else %}
+<div class="grid">
+  <div class="card"><h3>Session</h3>
+    {% if health.reader_state == 'revoked' %}<div class="dot bad" role="alert">Revoked by Telegram</div><div class="muted small">Log in again on the NAS.</div>
+    {% elif not reader.logged_in %}<div class="dot warn">Not logged in</div><div class="muted small"><code>docker exec -it tykee python -m app.reader.login</code></div>
+    {% elif health.reader_state == 'error' %}<div class="dot bad" role="alert">Error</div><div class="muted small">{{ health.reader_error }}</div>
+    {% else %}<div class="dot ok">Logged in</div><div class="muted small">shown as "Tykee reader (read-only)" in Telegram → Settings → Devices</div>{% endif %}
+  </div>
+  <div class="card"><h3>Reading</h3>
+    <form method="post" action="/system/reader/enabled">{{ csrf_input }}
+      <label class="check"><input type="checkbox" name="enabled" {{ 'checked' if s.reader_enabled }} onchange="this.form.submit()"> Reader on <span class="muted small">(<code>reader.enabled</code>)</span></label>
+      <noscript><button class="sm">Save</button></noscript>
+    </form>
+    <div class="muted small">last poll {{ health.reader_last_poll_at | ago }}</div>
+  </div>
+</div>
+{% endif %}
+
+<h2>Chats</h2>
+<div class="table-wrap"><table><tr><th>Chat</th><th>Status</th><th>Settings</th><th>Consent</th><th></th></tr>
+{% for ch in chats %}
+<tr><td><b>{{ ch.label }}</b><div class="muted small">{{ ch.kind }} {{ ch.peer_id }}{% if ch.thread_id %} · topic {{ ch.thread_id }}{% endif %}</div></td>
+<td class="small"><span class="pill st-{{ 'ok' if ch.status == 'ok' else ('bad' if ch.status in ('revoked', 'not_found', 'error') else 'warn' if ch.status == 'flood_wait' else '') }}">{{ ch.status if ch.readable else ('not consented' if not ch.consent_at else 'disabled') }}</span>
+  {% if ch.error %}<div class="muted">{{ ch.error }}</div>{% endif %}
+  <div>fetched {{ ch.last_fetch_at | ago }}; today {{ ch.fetched_today if ch.fetch_day == today else 0 }}</div>
+  <div>harvested {{ ch.last_harvest_at | ago }}{% if ch.last_harvest %} ({{ ch.last_harvest }}){% endif %}</div>
+  {% set bf = backfills.get(ch.id) %}{% if bf %}<div>Backfill: {{ bf.status }}{% if bf.messages %}, {{ bf.messages }} messages{% endif %}{% if bf.job_id %} → <a href="/import/{{ bf.job_id }}">import #{{ bf.job_id }}</a>{% endif %}{% if bf.error %} ({{ bf.error }}){% endif %}</div>{% endif %}</td>
+<td><form method="post" action="/system/reader/{{ ch.id }}/update" class="inline">{{ csrf_input }}
+  <input type="text" name="label" value="{{ ch.label }}" aria-label="Label" style="max-width:180px">
+  <label class="check small"><input type="checkbox" name="enabled" {{ 'checked' if ch.enabled }}> enabled</label>
+  <label class="small">every <input type="number" name="interval_min" value="{{ ch.interval_min }}" min="5" max="1440" style="width:5rem"> min</label>
+  <label class="small">keep raw text <input type="number" name="retention_days" value="{{ ch.retention_days }}" min="1" max="90" style="width:4rem"> days</label>
+  <button class="sm">Save</button></form></td>
+<td><form method="post" action="/system/reader/{{ ch.id }}/consent" class="inline">{{ csrf_input }}
+  {% if ch.consent_at %}<span class="small">given {{ local(ch.consent_at, '%d %b %Y') }}</span><button class="sm">Withdraw</button>
+  {% else %}<label class="check small"><input type="checkbox" name="consent" required> {% if ch.kind == 'user' %}{{ ch.label }} agreed to Tykee reading our private chat.{% else %}Everyone in {{ ch.label }} agreed to Tykee reading it.{% endif %}</label>
+  <input type="password" name="password" aria-label="Admin password" placeholder="admin password" autocomplete="current-password" required style="max-width:160px"><button class="sm">Record consent</button>{% endif %}</form></td>
+<td><form method="post" action="/system/reader/{{ ch.id }}/backfill" class="inline">{{ csrf_input }}<button class="sm" {{ 'disabled' if not ch.readable }}>Backfill</button></form>
+  <form method="post" action="/system/reader/{{ ch.id }}/remove" class="inline" onsubmit="return confirm('Stop reading {{ ch.label }} and delete its raw messages? Learned decisions and facts stay.')">{{ csrf_input }}<button class="sm danger">Remove</button></form></td></tr>
+{% else %}<tr><td colspan="5">No chats yet. Nothing is read until a chat is added here and has consent.</td></tr>{% endfor %}
+</table></div>
+<p class="help">Polling reads only new messages, once per interval. Raw text is deleted after the retention period once it's been harvested; decisions, approved facts and places stay. <b>Backfill</b> pulls up to 6 months of a chat into <a href="/import">Import</a>, with the same cost preview, consent and review steps as an export.</p>
+
+{% if reader and reader.configured %}
+<h2>Add a chat</h2>
+<form method="post" action="/system/reader/add" class="form-panel">{{ csrf_input }}
+  <div class="row">
+    <div><label for="r-ref">@username, numeric id or t.me link</label><input id="r-ref" type="text" name="ref" value="{{ ref }}" required placeholder="@jocelyn"></div>
+    <div><label for="r-label">Label</label><input id="r-label" type="text" name="label" value="{{ label }}" placeholder="DM with Jocelyn"></div>
+    <div><label for="r-topic">Topic id (forum groups, optional)</label><input id="r-topic" type="number" name="topic" min="1"></div>
+    <div><label for="r-pw">Admin password (again)</label><input id="r-pw" type="password" name="password" required autocomplete="current-password"></div>
+  </div>
+  <label class="check"><input type="checkbox" name="consent"> The other person (or everyone in the group) agreed to Tykee reading this chat.</label>
+  <div class="actions"><button class="primary">Add chat</button>{% if reader.logged_in %}<a href="/system/reader/pick">Pick from my chats</a>{% endif %}</div>
+  <p class="help">Not allowed: Tykee's own group, channels, Saved Messages, chats with bots, and groups with more than {{ s.reader_max_group_members }} members. Adding a chat sends you a Telegram message from the bot.</p>
+</form>
+{% endif %}
+
+<h2>Audit log</h2>
+<div class="table-wrap"><table><tr><th>When</th><th>Action</th><th>Chat</th><th>By</th><th>Detail</th></tr>
+{% for a in audit %}<tr><td class="small">{{ local(a.created_at) }}</td><td>{{ a.action }}</td><td>{{ a.chat_label or '' }}</td><td class="small">{{ a.actor }}</td><td class="small muted">{{ a.detail or '' }}</td></tr>
+{% else %}<tr><td colspan="5">Nothing yet.</td></tr>{% endfor %}
+</table></div>
+{% endblock %}

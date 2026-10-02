@@ -7,6 +7,10 @@ Haiku-tier extraction call per window (shared schema with the M5 import, safe-to
 ``source='observed'`` (feeding recency), unknown categories and new options become inbox
 suggestions. The cursor only advances after a successful harvest (or a window the model keeps
 returning invalid output for, which is skipped after a few tries).
+
+Chats read by the account reader (§10.7) are harvested the same way, as their own targets:
+``source='account_reader'`` rows, the cursor in ``reader_chats.harvest_msg_id``, and any new
+message is due (the reader already batches by its polling interval).
 """
 
 from __future__ import annotations
@@ -24,6 +28,7 @@ from pydantic import ValidationError
 
 from app.brain.memory import MemoryPolicyError, MemoryService
 from app.db.database import Database
+from app.db.repos import messages as messages_repo
 from app.db.repos.messages import StoredMessage
 from app.db.repos.users import UserRecord
 from app.decisions.service import DecisionService
@@ -71,12 +76,43 @@ SELECT COALESCE(m.thread_id, 0) AS thread_id,
 FROM messages m
 LEFT JOIN topic_harvest h
        ON h.chat_id = m.chat_id AND h.thread_id = COALESCE(m.thread_id, 0)
-WHERE m.chat_id = ?
+WHERE m.source = 'bot'
+  AND m.chat_id = ?
   AND m.role = 'user'
   AND COALESCE(m.thread_id, 0) <> ?
   AND m.id > COALESCE(h.last_msg_id, 0)
 GROUP BY COALESCE(m.thread_id, 0)
 """
+
+
+READER_BACKLOG_SQL = """
+SELECT r.id                AS reader_id,
+       COUNT(m.id)         AS new_msgs,
+       MIN(m.created_at)   AS oldest_new,
+       MAX(m.id)           AS newest_id
+FROM reader_chats r
+JOIN messages m
+  ON m.source = 'account_reader'
+ AND m.chat_id = r.peer_id
+ AND m.thread_id IS r.thread_id
+ AND m.role = 'user'
+ AND m.id > r.harvest_msg_id
+WHERE r.enabled = 1 AND r.consent_at IS NOT NULL
+GROUP BY r.id
+"""
+
+
+@dataclass(frozen=True)
+class Target:
+    """What one harvest reads: a group topic, or a chat the account reader reads (§10.7)."""
+
+    chat_id: int
+    key: int  # thread key for cursors and harvest_runs (NO_TOPIC when there is none)
+    thread: int | None  # messages.thread_id to match (None → IS NULL)
+    source: messages_repo.Source
+    name: str
+    reader_id: int | None = None
+    dm: bool = False  # a reader DM between the two users: decisions are for both
 
 
 @dataclass(frozen=True)
@@ -98,9 +134,29 @@ class RunResult:
     skipped_out_of_scope: int = 0
     errors: list[str] = field(default_factory=list)
 
+    def summary(self) -> str:
+        """Short result for the reader page, e.g. 'done: 1 decision, 2 facts'."""
+        parts = [
+            f"{n} {word}{'' if n == 1 else 's'}"
+            for n, word in (
+                (self.decisions, "decision"),
+                (self.facts, "fact"),
+                (self.suggestions, "suggestion"),
+            )
+            if n
+        ]
+        return f"{self.status}: {', '.join(parts) or 'nothing new'}"
+
+
+WHAT_TOPIC = "a couple's group-chat topic"
+WHAT_DM = "the couple's private chat with each other"
+WHAT_GROUP = (
+    'a small group chat the couple is in (other people appear as "someone"; never extract '
+    "facts about them, and use them only as context)"
+)
 
 SYSTEM_PROMPT = """\
-You read a couple's group-chat topic and extract what their decision bot, Tykee, should \
+You read {what} and extract what their decision bot, Tykee, should \
 remember. Users (use these slugs as owner / for_users): {users}. Use "shared" for things about \
 both of them or the household, and "both" for decisions made for both.
 
@@ -220,6 +276,17 @@ class Harvester:
         self._last_tick = now
         if self._health is not None:
             self._health.last_harvest_tick_at = now
+        results = await self._group_tick(s, now)
+        return results + await self._reader_tick(s)
+
+    async def tick_reader(self) -> list[RunResult]:
+        """§10.7: right after the account reader stored new messages, harvest them now rather
+        than at the next ``harvest.interval_min`` (decisions show up within one poll)."""
+        async with self._lock:
+            s = await self._settings.load()
+            return await self._reader_tick(s) if s.harvest_enabled else []
+
+    async def _group_tick(self, s: RuntimeSettings, now: datetime) -> list[RunResult]:
         group, answer = self._group_id(), s.telegram_answer_topic_id
         if group is None or answer is None:
             return []  # no answer topic yet: every topic is answered live, nothing to harvest
@@ -248,7 +315,53 @@ class Harvester:
         if await self._over_warn_budget(s):
             log.warning("harvest paused: budget above warning level")
             return [RunResult(b.thread_id, "budget") for b in due]
-        return [await self._harvest(group, b, s) for b in due]
+        out = []
+        for b in due:
+            name = await self._topics.name_of(
+                group, None if b.thread_id == NO_TOPIC else b.thread_id
+            )
+            target = Target(
+                chat_id=group,
+                key=b.thread_id,
+                thread=None if b.thread_id == NO_TOPIC else b.thread_id,
+                source=messages_repo.BOT,
+                name="earlier chat" if b.thread_id == NO_TOPIC else name,
+            )
+            out.append(await self._harvest(target, b, s))
+        return out
+
+    async def _reader_tick(self, s: RuntimeSettings) -> list[RunResult]:
+        """Reader chats with new messages (§10.7). Any new message is due."""
+
+        def _q(c: sqlite3.Connection) -> list[tuple[Target, Backlog]]:
+            out = []
+            for r in c.execute(READER_BACKLOG_SQL).fetchall():
+                chat = c.execute(
+                    "SELECT * FROM reader_chats WHERE id = ?", (r["reader_id"],)
+                ).fetchone()
+                target = Target(
+                    chat_id=int(chat["peer_id"]),
+                    key=int(chat["thread_id"] or NO_TOPIC),
+                    thread=chat["thread_id"],
+                    source=messages_repo.READER,
+                    name=str(chat["label"]),
+                    reader_id=int(chat["id"]),
+                    dm=chat["kind"] == "user",
+                )
+                backlog = Backlog(
+                    target.key, int(r["new_msgs"]), from_sql(r["oldest_new"]), int(r["newest_id"])
+                )
+                out.append((target, backlog))
+            return out
+
+        due = await self._db.read(_q)
+        if not due:
+            return []
+        log.info("reader harvest", extra={"chats": [t.reader_id for t, _ in due]})
+        if await self._over_warn_budget(s):
+            log.warning("harvest paused: budget above warning level")
+            return [RunResult(b.thread_id, "budget") for _, b in due]
+        return [await self._harvest(t, b, s) for t, b in due]
 
     async def _over_warn_budget(self, s: RuntimeSettings) -> bool:
         """§10.4: the harvester pauses at 80% of either cap, before anything user-facing."""
@@ -261,27 +374,28 @@ class Harvester:
     # --- stage 2: LLM harvest ----------------------------------------------------------------
 
     async def _rows(
-        self, group: int, b: Backlog, s: RuntimeSettings
+        self, t: Target, b: Backlog, s: RuntimeSettings
     ) -> tuple[list[StoredMessage], list[StoredMessage], int]:
-        from app.db.repos import messages as messages_repo
-
         def _q(c: sqlite3.Connection) -> tuple[list[StoredMessage], list[StoredMessage], int]:
-            thread_sql = "thread_id IS NULL" if b.thread_id == NO_TOPIC else "thread_id = ?"
-            targs: tuple[int, ...] = () if b.thread_id == NO_TOPIC else (b.thread_id,)
-            cur = c.execute(
-                "SELECT last_msg_id FROM topic_harvest WHERE chat_id = ? AND thread_id = ?",
-                (group, b.thread_id),
-            ).fetchone()
+            if t.reader_id is not None:
+                cur = c.execute(
+                    "SELECT harvest_msg_id FROM reader_chats WHERE id = ?", (t.reader_id,)
+                ).fetchone()
+            else:
+                cur = c.execute(
+                    "SELECT last_msg_id FROM topic_harvest WHERE chat_id = ? AND thread_id = ?",
+                    (t.chat_id, t.key),
+                ).fetchone()
             cursor = int(cur[0]) if cur else 0
             new = c.execute(
-                f"SELECT * FROM messages WHERE chat_id = ? AND {thread_sql} AND role = 'user' "
-                f"AND id > ? AND id <= ? ORDER BY id",
-                (group, *targs, cursor, b.newest_id),
+                "SELECT * FROM messages WHERE source = ? AND chat_id = ? AND thread_id IS ? "
+                "AND role = 'user' AND id > ? AND id <= ? ORDER BY id",
+                (t.source, t.chat_id, t.thread, cursor, b.newest_id),
             ).fetchall()
             ctx = c.execute(
-                f"SELECT * FROM messages WHERE chat_id = ? AND {thread_sql} "
-                f"AND role IN ('user', 'assistant') AND id <= ? ORDER BY id DESC LIMIT ?",
-                (group, *targs, cursor, s.harvest_context_messages),
+                "SELECT * FROM messages WHERE source = ? AND chat_id = ? AND thread_id IS ? "
+                "AND role IN ('user', 'assistant') AND id <= ? ORDER BY id DESC LIMIT ?",
+                (t.source, t.chat_id, t.thread, cursor, s.harvest_context_messages),
             ).fetchall()
             return (
                 [messages_repo.from_row(r) for r in new],
@@ -297,26 +411,25 @@ class Harvester:
         when = from_sql(row.created_at).astimezone(self._tz).strftime("%Y-%m-%d %H:%M")
         return f"[{when}] {who}: {row.text.strip()}"
 
-    async def _harvest(self, group: int, b: Backlog, s: RuntimeSettings) -> RunResult:
-        new, context, _ = await self._rows(group, b, s)
+    async def _harvest(self, t: Target, b: Backlog, s: RuntimeSettings) -> RunResult:
+        new, context, _ = await self._rows(t, b, s)
         result = RunResult(b.thread_id, "done", messages=len(new))
         if not new:
-            await self._advance(group, b.thread_id, b.newest_id)
+            await self._advance(t, b.newest_id)
             return result
-        topic_name = await self._topics.name_of(
-            group, None if b.thread_id == NO_TOPIC else b.thread_id
-        )
-        if b.thread_id == NO_TOPIC:
-            topic_name = "earlier chat"
+        topic_name = t.name
+        what = WHAT_TOPIC if t.reader_id is None else (WHAT_DM if t.dm else WHAT_GROUP)
         system = SYSTEM_PROMPT.format(
+            what=what,
             users=", ".join(f"{u.slug} ({u.display_name})" for u in self._users),
             rules=SAFE_TOPIC_RULES,
         )
+        heading = "Topic" if t.reader_id is None else "Chat"
         prior = [self._line(r) for r in context]
         for i, win in enumerate(windows(new)):
             if i > 0 and await self._over_warn_budget(s):
                 result.status = "budget"
-                return await self._record(group, b, new, result)
+                return await self._record(t, b, new, result)
             transcript = "\n".join([*prior, "--- new ---", *(self._line(r) for r in win)])
             try:
                 resp = await self._llm.complete(
@@ -327,26 +440,26 @@ class Harvester:
                             {"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}
                         ],
                         messages=[
-                            {"role": "user", "content": f"Topic: {topic_name}\n\n{transcript}"}
+                            {"role": "user", "content": f"{heading}: {topic_name}\n\n{transcript}"}
                         ],
                         max_tokens=HARVEST_MAX_TOKENS,
                         json_schema=EXTRACTION_SCHEMA,
-                        chat_id=group,
+                        chat_id=t.chat_id if t.reader_id is None else None,
                         timeout_s=120.0,
                     )
                 )
                 extraction = Extraction.model_validate(json.loads(resp.text))
             except BudgetExceeded:
                 result.status = "budget"
-                return await self._record(group, b, new, result)
+                return await self._record(t, b, new, result)
             except LLMError as e:
                 # API down/timeouts: retried next tick, never skipped.
-                return await self._failed(group, b, new, result, type(e).__name__)
+                return await self._failed(t, b, new, result, type(e).__name__)
             except (json.JSONDecodeError, ValidationError) as e:
                 key = (b.thread_id, win[0].id)
                 self._bad_output[key] = self._bad_output.get(key, 0) + 1
                 if self._bad_output[key] < MAX_BAD_OUTPUT:
-                    return await self._failed(group, b, new, result, type(e).__name__)
+                    return await self._failed(t, b, new, result, type(e).__name__)
                 # The model keeps choking on this window: skip it rather than pay forever.
                 del self._bad_output[key]
                 log.warning(
@@ -355,30 +468,34 @@ class Harvester:
                 )
                 result.status = "skipped"
                 result.errors.append(type(e).__name__)
-                await self._advance(group, b.thread_id, win[-1].id)
+                await self._advance(t, win[-1].id)
                 prior = [self._line(r) for r in win[-s.harvest_context_messages :]]
                 continue
             self._bad_output.pop((b.thread_id, win[0].id), None)
             last = win[-1]
-            source = f"topic:{topic_name}/msg:{last.tg_message_id or last.id}"
+            kind = "topic" if t.reader_id is None else "reader"
+            source = f"{kind}:{topic_name}/msg:{last.tg_message_id or last.id}"
             marked = [a for r in win for a in place_links.annotations_in(r.text)]
             await self._apply(
-                extraction, result, source, topic_name, from_sql(last.created_at), marked
+                extraction, result, source, topic_name, from_sql(last.created_at), marked, t
             )
             # Advance per window: a later failure must not re-propose what already landed.
-            await self._advance(group, b.thread_id, last.id)
+            await self._advance(t, last.id)
             prior = [self._line(r) for r in win[-s.harvest_context_messages :]]
-        await self._advance(group, b.thread_id, b.newest_id)
-        return await self._record(group, b, new, result)
+        await self._advance(t, b.newest_id)
+        return await self._record(t, b, new, result)
 
     async def _failed(
-        self, group: int, b: Backlog, new: Sequence[StoredMessage], result: RunResult, error: str
+        self, t: Target, b: Backlog, new: Sequence[StoredMessage], result: RunResult, error: str
     ) -> RunResult:
         """Keep what earlier windows of this run already applied in the counts."""
-        log.warning("harvest failed", extra={"thread_id": b.thread_id, "error": error})
+        log.warning(
+            "harvest failed",
+            extra={"thread_id": b.thread_id, "reader_chat": t.reader_id, "error": error},
+        )
         result.status = "error"
         result.errors.append(error)
-        return await self._record(group, b, new, result)
+        return await self._record(t, b, new, result)
 
     async def _apply(
         self,
@@ -388,7 +505,9 @@ class Harvester:
         topic: str,
         fallback_ts: datetime,
         marked: Sequence[place_links.Annotated] = (),
+        target: Target | None = None,
     ) -> None:
+        reader = target is not None and target.reader_id is not None
         result.skipped_out_of_scope += ex.skipped_out_of_scope
         for fact in ex.facts:
             if fact.confidence < MIN_FACT_CONFIDENCE:
@@ -437,20 +556,30 @@ class Harvester:
                     result.suggestions += 1
                 continue
             for_users = ep.for_users if ep.for_users in (*self._slugs, "both") else "both"
+            if target is not None and target.dm:
+                for_users = "both"  # §10.7: what the two of them settle in their DM
             choice = ep.choice.strip()
             place = None
             if (pid := place_links.match_place(choice, marked)) is not None and self._places:
                 place = await self._places.get(pid)
+            at = _parse_ts(ep.ts, fallback_ts, self._tz)
             await self._decisions.record_observed(
                 category,
                 choice=place.name if place else choice,
                 for_users=for_users,
-                at=_parse_ts(ep.ts, fallback_ts, self._tz),
-                chat_id=self._group_id(),
+                at=at,
+                # A reader chat's peer id can equal a bot DM's chat_id (§10.7): keep it out of
+                # per-chat session logic.
+                chat_id=None if reader else self._group_id(),
                 place_id=place.id if place else None,
             )
             if place is not None and self._places is not None:
                 await self._places.visit(place.id)
+            # §8.4 / §10.7: observed decisions go to the vault's decision log too.
+            await self._memory.log_decision(
+                f"- {at.astimezone(self._tz):%H:%M} · {category.display_name} · "
+                f"**{place.name if place else choice}** · for {for_users} · seen in {topic}"
+            )
             result.decisions += 1
 
         for opt in ex.options:
@@ -519,8 +648,18 @@ class Harvester:
         )
         return True
 
-    async def _advance(self, group: int, thread_id: int, last_msg_id: int) -> None:
+    async def _advance(self, t: Target, last_msg_id: int) -> None:
         now = to_sql(self._clock())
+        if t.reader_id is not None:
+            await self._db.write(
+                lambda c: c.execute(
+                    "UPDATE reader_chats SET harvest_msg_id = MAX(harvest_msg_id, ?), "
+                    "last_harvest_at = ? WHERE id = ?",
+                    (last_msg_id, now, t.reader_id),
+                )
+            )
+            return
+        group, thread_id = t.chat_id, t.key
         await self._db.write(
             lambda c: c.execute(
                 "INSERT INTO topic_harvest(chat_id, thread_id, last_msg_id, last_run_at, "
@@ -532,16 +671,18 @@ class Harvester:
         )
 
     async def _record(
-        self, group: int, b: Backlog, new: Sequence[StoredMessage], r: RunResult
+        self, t: Target, b: Backlog, new: Sequence[StoredMessage], r: RunResult
     ) -> RunResult:
         first = new[0].id if new else b.newest_id
-        await self._db.write(
-            lambda c: c.execute(
+        now = to_sql(self._clock())
+
+        def _save(c: sqlite3.Connection) -> None:
+            c.execute(
                 "INSERT INTO harvest_runs(chat_id, thread_id, from_msg_id, to_msg_id, messages, "
-                "facts, decisions, suggestions, skipped_out_of_scope, status, created_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "facts, decisions, suggestions, skipped_out_of_scope, status, created_at, "
+                "reader_chat_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
-                    group,
+                    t.chat_id,
                     b.thread_id,
                     first,
                     b.newest_id,
@@ -551,14 +692,22 @@ class Harvester:
                     r.suggestions,
                     r.skipped_out_of_scope,
                     r.status,
-                    to_sql(self._clock()),
+                    now,
+                    t.reader_id,
                 ),
             )
-        )
+            if t.reader_id is not None:
+                c.execute(
+                    "UPDATE reader_chats SET last_harvest = ?, last_harvest_at = ? WHERE id = ?",
+                    (r.summary(), now, t.reader_id),
+                )
+
+        await self._db.write(_save)
         log.info(
             "harvested topic",
             extra={
                 "thread_id": b.thread_id,
+                "reader_chat": t.reader_id,
                 "status": r.status,
                 "messages": len(new),
                 "facts": r.facts,

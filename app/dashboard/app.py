@@ -61,6 +61,7 @@ def create_app(deps: DashboardDeps) -> FastAPI:
         views_ops,
         views_overview,
         views_places,
+        views_reader,
     )
 
     app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
@@ -128,6 +129,7 @@ def create_app(deps: DashboardDeps) -> FastAPI:
         views_chat,
         views_import,
         views_ops,
+        views_reader,
     ):
         module.register(private, deps)
 

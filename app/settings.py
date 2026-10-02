@@ -18,7 +18,7 @@ from app.db.database import Database
 SEED_DIR = Path(__file__).parent / "seed"
 
 ModelRole = Literal[
-    "default", "escalated", "judge", "import_extract", "import_consolidate", "harvest"
+    "default", "escalated", "deep", "judge", "import_extract", "import_consolidate", "harvest"
 ]
 
 
@@ -38,10 +38,13 @@ class Models(BaseModel):
     import_extract: str
     import_consolidate: str
     harvest: str = ""  # falls back to judge (both Haiku-tier) when unset
+    deep: str = ""  # §7.1 "think even harder" (Opus-tier); falls back to escalated when unset
 
     def for_role(self, role: str) -> str:
         value = str(getattr(self, role))
-        return value or (self.judge if role == "harvest" else value)
+        if value:
+            return value
+        return {"harvest": self.judge, "deep": self.escalated}.get(role, value)
 
 
 DAYS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
@@ -260,6 +263,15 @@ class RuntimeSettings(BaseModel):
     recommend_explore_ratio: float = Field(0.34, ge=0, le=1)
     recommend_web_attr_ttl_days: int = Field(180, ge=1)
     recommend_max_web_searches: int = Field(2, ge=0, le=5)
+    escalation_enabled: bool = True
+    escalation_think_phrases: list[str] = Field(default_factory=list)
+    escalation_deep_phrases: list[str] = Field(default_factory=list)
+    escalation_long_message_chars: int = Field(600, ge=0)  # 0 → no length heuristic
+    escalation_max_tokens: int = Field(1200, ge=100, le=8000)  # replies on Sonnet/Opus tiers
+    reader_enabled: bool = False
+    reader_max_group_members: int = Field(20, ge=2, le=200)
+    reader_default_interval_min: int = Field(30, ge=5, le=1440)
+    reader_default_retention_days: int = Field(7, ge=1, le=90)
 
     @field_validator("places_reaction")
     @classmethod
