@@ -9,7 +9,13 @@ import httpx2
 import pytest
 
 from app.db.repos import usage as usage_repo
-from app.llm.client import AnthropicLLMClient, BudgetExceeded, LLMRequest, LLMUnavailable
+from app.llm.client import (
+    AnthropicLLMClient,
+    BudgetExceeded,
+    LLMBadRequest,
+    LLMRequest,
+    LLMUnavailable,
+)
 from app.settings import seed_values, set_value
 from app.timeutil import to_sql, utcnow
 from tests.conftest import Env
@@ -109,6 +115,14 @@ async def test_auth_failure_switches_to_fallback(env: Env) -> None:
     with pytest.raises(LLMUnavailable):
         await client.complete(_req(env))
     assert not client.configured
+
+
+async def test_bad_request_carries_the_api_message(env: Env) -> None:
+    err = {"type": "error", "error": {"type": "invalid_request_error", "message": "web off"}}
+    script = Script(httpx2.Response(400, json=err))
+    with pytest.raises(LLMBadRequest) as info:
+        await _client(env, script).complete(_req(env))
+    assert info.value.detail == "web off"
 
 
 async def test_missing_key_never_calls_api(env: Env) -> None:

@@ -260,6 +260,7 @@ def make_stack(
         memory=memory,
         places=places,
         recommend=recommend,
+        health=health,
         clock=clock,
     )
     ambient = AmbientService(

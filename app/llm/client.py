@@ -52,7 +52,12 @@ class LLMUnavailable(LLMError):
 
 
 class LLMBadRequest(LLMUnavailable):
-    """The API rejected the request itself (400), e.g. web search disabled for the org."""
+    """The API rejected the request itself (400), e.g. web search disabled for the org.
+    ``detail`` is the API's own error message (no secrets or message contents)."""
+
+    def __init__(self, name: str, detail: str = "") -> None:
+        super().__init__(name)
+        self.detail = detail
 
 
 class BudgetExceeded(LLMError):
@@ -151,6 +156,17 @@ def check_budget(status: BudgetStatus, *, monthly_only: bool = False) -> None:
         raise BudgetExceeded("monthly", status.monthly_spent, status.monthly_cap)
     if not monthly_only and status.daily_spent >= status.daily_cap:
         raise BudgetExceeded("daily", status.daily_spent, status.daily_cap)
+
+
+def _error_detail(e: anthropic.APIError, limit: int = 300) -> str:
+    """The API's own error message (e.g. "web search is not enabled for this organization"),
+    so a rejected request can be explained on the dashboard."""
+    body = e.body
+    if isinstance(body, dict):
+        err = body.get("error")
+        if isinstance(err, dict) and isinstance(err.get("message"), str):
+            return str(err["message"])[:limit]
+    return e.message[:limit]
 
 
 class AnthropicLLMClient:
@@ -294,12 +310,18 @@ class AnthropicLLMClient:
             self.auth_failed = True
             log.error("anthropic auth failed; switching to fallback mode")
             return LLMUnavailable("API key rejected")
+        detail = _error_detail(e) if isinstance(e, anthropic.BadRequestError) else ""
         log.warning(
             "anthropic call failed",
-            extra={"purpose": req.purpose, "model": model, "error": type(e).__name__},
+            extra={
+                "purpose": req.purpose,
+                "model": model,
+                "error": type(e).__name__,
+                "detail": detail or None,
+            },
         )
         if isinstance(e, anthropic.BadRequestError):
-            return LLMBadRequest(type(e).__name__)
+            return LLMBadRequest(type(e).__name__, detail)
         return LLMUnavailable(type(e).__name__)
 
     async def _record_usage(

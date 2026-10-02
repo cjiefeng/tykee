@@ -37,6 +37,8 @@ class HealthState:
     last_backup_at: datetime | None = None
     last_backup_error: str | None = None
     last_vault_status: str | None = None
+    web_rejected: str | None = None  # the API's 400 for a request carrying web tools (§7.5)
+    web_rejected_at: datetime | None = None
     reader_state: str = "off"  # §10.7: 'off' | 'not_logged_in' | 'ok' | 'revoked' | 'error'
     reader_error: str | None = None
     reader_last_poll_at: datetime | None = None
@@ -65,6 +67,14 @@ class HealthState:
         since = utcnow() - timedelta(hours=hours)
         recent = [ok for t, ok in self.llm_calls if t >= since]
         return sum(1 for ok in recent if not ok), len(recent)
+
+    def web_rejected_by_api(self, detail: str) -> None:
+        self.web_rejected = detail or "request rejected (400)"
+        self.web_rejected_at = utcnow()
+
+    def web_ok(self) -> None:
+        self.web_rejected = None
+        self.web_rejected_at = None
 
     def saw_update(self) -> None:
         self.last_update_at = utcnow()

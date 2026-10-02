@@ -196,6 +196,7 @@ async def run(env: Env) -> None:
             memory=memory,
             places=places,
             recommend=recommend,
+            health=health,
         )
         ambient = AmbientService(
             db=db,
