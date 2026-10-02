@@ -6,7 +6,15 @@ import httpx
 
 from app.places.resolver import MAX_HOPS, PlaceResolver
 from tests.conftest import Env, maps_transport
-from tests.unit.test_place_links import CID, HOME_Q, SHARED_Q
+from tests.unit.test_place_links import (
+    CID,
+    HOME_Q,
+    SHARE,
+    SHARE_HOP,
+    SHARE_NOT_PLACE,
+    SHARE_SEARCH,
+    SHARED_Q,
+)
 
 SHORT = "https://maps.app.goo.gl/AbC123xyz"
 
@@ -106,3 +114,42 @@ async def test_home_address_is_unnamed_and_final_url_not_kept(env: Env) -> None:
     assert res.status == "unnamed" and res.parsed is None
     row = await env.db.read(lambda c: c.execute("SELECT * FROM place_links").fetchone())
     assert row["status"] == "unnamed" and row["final_url"] is None
+
+
+async def test_share_google_follows_both_hops(env: Env) -> None:
+    calls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(str(request.url))
+        target = {SHARE: SHARE_HOP, SHARE_HOP: SHARE_SEARCH}[str(request.url)]
+        return httpx.Response(302, headers={"location": target}, stream=_Exploding())
+
+    r = _resolver(env, httpx.MockTransport(handler))
+    res = await r.resolve(SHARE)
+    assert res.status == "resolved" and res.parsed is not None
+    assert res.parsed.name == "Keisuke Tonkotsu King"
+    assert res.parsed.google_id == "kgmid:/g/11c1q9t9qv"
+    assert calls == [SHARE, SHARE_HOP]  # the search page is parsed, never fetched
+
+    again = await r.resolve(SHARE)
+    assert again.cached and again.status == "resolved" and again.parsed == res.parsed
+
+
+async def test_share_google_that_is_not_a_place(env: Env) -> None:
+    r = _resolver(env, maps_transport({SHARE: SHARE_HOP, SHARE_HOP: SHARE_NOT_PLACE}))
+    res = await r.resolve(SHARE)
+    assert res.status == "not_place" and res.parsed is None
+    row = await env.db.read(lambda c: c.execute("SELECT * FROM place_links").fetchone())
+    assert row["status"] == "not_place" and row["final_url"] is None  # cached, never retried
+
+
+async def test_share_google_to_an_address_is_unnamed(env: Env) -> None:
+    home = SHARE_SEARCH.replace("q=Keisuke+Tonkotsu+King", "q=Blk+123+Tampines+Street+11")
+    r = _resolver(env, maps_transport({SHARE: SHARE_HOP, SHARE_HOP: home}))
+    assert (await r.resolve(SHARE)).status == "unnamed"
+
+
+async def test_share_google_to_another_site_is_blocked(env: Env) -> None:
+    r = _resolver(env, maps_transport({SHARE: "https://news.example/article"}))
+    res = await r.resolve(SHARE)
+    assert res.status == "blocked_host" and res.error == "news.example"

@@ -28,7 +28,7 @@
 <td>{{ l.place_name or '' }}</td><td>{{ l.attempts }}</td><td class="small">{{ local(l.resolved_at) }}</td></tr>
 {% else %}<tr><td colspan="5">No links resolved yet.</td></tr>{% endfor %}
 </table></div>
-<p class="help"><b>unnamed</b>: coordinates, an address or a home, so nothing was stored. <b>failed</b> links get one more try a few hours later.</p>
+<p class="help"><b>unnamed</b>: coordinates, an address or a home, so nothing was stored. <b>not_place</b>: a Google share link to something that isn't a location. <b>failed</b> links get one more try a few hours later.</p>
 
 <h2>Settings</h2>
 <form method="post" action="/memory/places/settings" class="form-panel">{{ csrf_input }}
