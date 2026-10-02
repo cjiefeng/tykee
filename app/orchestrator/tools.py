@@ -542,10 +542,12 @@ class TurnContext:
     last_picks: list[tuple[int, str]] = field(default_factory=list)  # (decision_id, name)
     recorded: list[tuple[int, int | None]] = field(default_factory=list)  # (decision, place)
     web_used: bool = False  # a web search/fetch ran this turn → memory writes need approval (§7.5)
-    web_on: bool = False  # web tools offered this turn (find_places may leave slots for the web)
+    web_on: bool = False  # web usable this turn, now or via look_up_web (find_places leaves slots)
     recommend: TurnState | None = None  # the turn's find_places, for save_place_candidates
     tier: Tier = "default"  # §7.1 model tier for this turn's calls
     max_tokens: int | None = None  # None → llm.max_tokens; escalation.max_tokens when escalated
+    web_wanted: bool = False  # look_up_web called, or find_places asked for the web (§7.5)
+    web_sent: bool = False  # a request this turn carried the web tools
 
 
 @dataclass(frozen=True)

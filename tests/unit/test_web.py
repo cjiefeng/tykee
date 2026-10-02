@@ -46,6 +46,13 @@ async def _set(env: Env, **values: Any) -> None:
     await env.db.write(_w)
 
 
+@pytest.fixture(autouse=True)
+async def _direct_web(env: Env) -> None:
+    """Most tests here cover the web tools themselves, offered on the first call
+    (``web.tier`` = default). The handoff tests below set the seeded tier back."""
+    await _set(env, web__tier="default")
+
+
 async def _usage(env: Env, *, cost: float = 0.0, searches: int = 0) -> None:
     row = usage_repo.UsageRow(
         user_id=None,
@@ -261,6 +268,76 @@ async def test_rejection_cooldown_expires(env: Env) -> None:
     await _ask(stack, env, RAMEN)
     assert "web_search" in _names(llm.requests[0].tools)
     assert stack.health.web_rejected is None
+
+
+# --- web.tier: hand the turn to the stronger model only when it needs the web -----------------
+
+
+async def test_default_tier_gets_look_up_web_and_stays_cheap_without_it(env: Env) -> None:
+    await _set(env, web__tier="escalated")
+    llm = FakeLLMClient("Ramen sounds good.")
+    await _ask(make_stack(env, llm), env, "ramen or pizza?")
+    (req,) = llm.requests
+    assert req.model_role == "default"
+    names = _names(req.tools)
+    assert "look_up_web" in names and not {"web_search", "web_fetch"} & set(names)
+    assert "call look_up_web first" in _system_text(llm)
+
+
+async def test_look_up_web_hands_the_turn_to_the_web_tier(env: Env) -> None:
+    await _set(env, web__tier="escalated")
+    llm = FakeLLMClient(
+        tool_call("look_up_web", need="reviews of the new ramen place"),
+        web_turn("Solid tonkotsu; queues at lunch.", query="ramen tanjong pagar"),
+    )
+    stack = make_stack(env, llm)
+    await _ask(stack, env, RAMEN)
+    first, second = llm.requests
+    assert (first.model_role, second.model_role) == ("default", "escalated")
+    assert second.max_tokens == seed_values()["escalation.max_tokens"]
+    assert {"web_search", "web_fetch", "look_up_web"} <= set(_names(second.tools))
+    assert first.system == second.system  # same rules, so the cached prefix holds
+    assert stack.gateway.sent[-1].text.startswith("Solid tonkotsu; queues at lunch.")
+
+
+async def test_think_tier_gets_the_web_tools_directly(env: Env) -> None:
+    await _set(env, web__tier="escalated")
+    llm = FakeLLMClient("ok")
+    stack = make_stack(env, llm)
+    dm = tg_message("/think is the ramen place any good?", from_id=JACK_TG, chat_id=JACK_TG)
+    await stack.adapter.handle_message(dm, env.jack)
+    names = _names(llm.requests[0].tools)
+    assert "web_search" in names and "look_up_web" not in names
+
+
+async def test_look_up_web_without_web_is_an_error_and_no_handoff(env: Env) -> None:
+    await _set(env, web__tier="escalated", web__enabled=False)
+    llm = FakeLLMClient(tool_call("look_up_web", need="x"), "Can't check right now.")
+    stack = make_stack(env, llm)
+    await _ask(stack, env, RAMEN)
+    assert "look_up_web" not in _names(llm.requests[0].tools)
+    assert llm.requests[1].model_role == "default"
+    assert "web_search" not in _names(llm.requests[1].tools)
+    assert stack.gateway.sent[-1].text == "Can't check right now."
+
+
+async def test_rejected_after_handoff_carries_on_without_web(env: Env) -> None:
+    """Tools may already have run before the handoff (e.g. find_places recorded picks), so a
+    rejection continues the same loop on the original tier instead of restarting the turn."""
+    await _set(env, web__tier="escalated")
+    llm = FakeLLMClient(
+        tool_call("look_up_web", need="x"),
+        LLMBadRequest("BadRequestError", "nope"),
+        "Can't check that right now.",
+    )
+    stack = make_stack(env, llm)
+    await _ask(stack, env, RAMEN)
+    _, rejected, retry = llm.requests
+    assert [r.model_role for r in llm.requests] == ["default", "escalated", "default"]
+    assert retry.messages == rejected.messages  # same history: nothing re-run
+    assert "web_search" not in _names(retry.tools)
+    assert stack.health.web_rejected == "nope"
+    assert stack.gateway.sent[-1].text == "Can't check that right now."
 
 
 def test_web_tools_only_on_the_orchestrator() -> None:

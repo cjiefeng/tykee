@@ -100,10 +100,22 @@ source_url; it always waits for approval. Don't use write_note in a turn where y
 live info, and don't retry."""
 
 
+WEB_HANDOFF_RULE = """
+- If web_search isn't in your tools yet, call look_up_web first (same rules: only when you'd \
+search anyway), then search."""
+
+
 def build_system(
-    persona: str, dynamic: str, pinned: str | None = None, *, web: bool = False
+    persona: str,
+    dynamic: str,
+    pinned: str | None = None,
+    *,
+    web: bool = False,
+    web_handoff: bool = False,
 ) -> list[TextBlockParam]:
-    rules = RULES + WEB_RULES if web else RULES
+    """``web_handoff``: the turn starts with look_up_web instead of the web tools. The rules stay
+    the same after the handoff, so the cached prefix does too."""
+    rules = RULES + WEB_RULES + (WEB_HANDOFF_RULE if web_handoff else "") if web else RULES
     blocks: list[TextBlockParam] = [
         {"type": "text", "text": persona},
         {"type": "text", "text": rules, "cache_control": {"type": "ephemeral"}},

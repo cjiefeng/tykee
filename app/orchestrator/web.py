@@ -25,6 +25,7 @@ from app.settings import RuntimeSettings
 from app.timeutil import local_day_start, to_sql, utcnow
 
 WEB_TOOL_NAMES = frozenset({"web_search", "web_fetch"})
+HANDOFF_TOOL = "look_up_web"
 MAX_SOURCES = 2
 # After the API rejects a request carrying web tools (e.g. web search off for the org in the
 # Console), skip them for a while instead of paying for a rejected call on every turn.
@@ -103,6 +104,27 @@ def web_tools(s: RuntimeSettings) -> list[ToolUnionParam]:
         }
         tools.append(cast(ToolUnionParam, fetch))
     return tools
+
+
+def handoff_tool() -> ToolUnionParam:
+    """§7.5: offered instead of the web tools on a tier below ``web.tier``. Calling it moves the
+    rest of the turn to that tier with web_search/web_fetch; turns that never need the web stay
+    on the cheap model."""
+    return {
+        "name": HANDOFF_TOOL,
+        "description": (
+            "Turn on live web search for this reply. Call it when the answer needs live or "
+            "outside facts (see the web rules); web_search and web_fetch are available after it."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "need": {"type": "string", "description": "What you need to look up, briefly."}
+            },
+            "required": ["need"],
+            "additionalProperties": False,
+        },
+    }
 
 
 def used_web(content: Sequence[ContentBlock]) -> bool:

@@ -158,6 +158,8 @@ def register(router: APIRouter, deps: DashboardDeps) -> None:
                 **_numbers(form, WEB_NUMBERS),
                 **_toggles(form, ["web.enabled"]),
             }
+            if isinstance(tier := form.get("web.tier"), str) and tier:
+                changes["web.tier"] = tier
             for key in WEB_DOMAIN_LISTS:
                 raw = form.get(key)
                 if isinstance(raw, str):
