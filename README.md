@@ -46,7 +46,7 @@ Telegram ◄─ long polling ─► Telegram adapter (aiogram) ─► Orchestrat
                            (weighted random)          (notes + FTS5 +        (SQLite, read
                                                        sqlite-vec + local     per request)
                                                        embeddings)
-Browser (LAN) ◄─► Dashboard (FastAPI, :8080)
+Browser (LAN) ◄─► Dashboard (FastAPI, :8081)
 
 /data/bot.db   SQLite: app state, FTS5, sqlite-vec
 /data/vault/   markdown notes (source of truth; the search index can be rebuilt from it)
