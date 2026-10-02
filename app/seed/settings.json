@@ -64,5 +64,9 @@
   "recommend.default_radius_m": 1500,
   "recommend.explore_ratio": 0.34,
   "recommend.web_attr_ttl_days": 180,
-  "recommend.max_web_searches": 2
+  "recommend.max_web_searches": 2,
+  "reader.enabled": false,
+  "reader.max_group_members": 20,
+  "reader.default_interval_min": 30,
+  "reader.default_retention_days": 7
 }

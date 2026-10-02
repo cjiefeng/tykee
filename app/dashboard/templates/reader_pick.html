@@ -1,0 +1,12 @@
+{% extends "base.html" %}
+{% block title %}Pick a chat{% endblock %}
+{% block content %}
+<a class="crumb" href="/system/reader">Account reader</a>
+<div class="page-head"><div><h1>Pick from my chats</h1>
+  <p class="lede">Your 50 most recent chats: names only, fetched just now and not stored. Choosing one fills in the add form; you still confirm with your password.</p></div></div>
+<div class="table-wrap"><table><tr><th>Chat</th><th>Type</th><th></th></tr>
+{% for d in dialogs %}<tr><td>{{ d.name }}</td><td class="small">{{ d.kind }}{% if d.forum %} (topics){% endif %}</td>
+<td>{% if d.kind in ('user', 'group') and d.peer_id != group_id %}<a href="/system/reader?ref={{ d.peer_id }}&label={{ d.name | urlencode }}">Choose</a>{% else %}<span class="muted small">not allowed</span>{% endif %}</td></tr>
+{% else %}<tr><td colspan="3">No chats.</td></tr>{% endfor %}
+</table></div>
+{% endblock %}

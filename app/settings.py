@@ -260,6 +260,10 @@ class RuntimeSettings(BaseModel):
     recommend_explore_ratio: float = Field(0.34, ge=0, le=1)
     recommend_web_attr_ttl_days: int = Field(180, ge=1)
     recommend_max_web_searches: int = Field(2, ge=0, le=5)
+    reader_enabled: bool = False
+    reader_max_group_members: int = Field(20, ge=2, le=200)
+    reader_default_interval_min: int = Field(30, ge=5, le=1440)
+    reader_default_retention_days: int = Field(7, ge=1, le=90)
 
     @field_validator("places_reaction")
     @classmethod

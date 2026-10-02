@@ -143,7 +143,8 @@ async def test_mention_cancels_pending_burst_and_skips_rules(env: Env) -> None:
 async def test_quiet_and_unquiet_commands(env: Env) -> None:
     stack = make_stack(env)
     await stack.adapter.handle_message(tg_message("/quiet 90m"), env.jack)
-    assert stack.gateway.sent[-1].text.startswith("🤐 OK, I'll stay quiet until 20:30")
+    # Weekday shown when "until" isn't today on the real clock (the stack clock is fixed).
+    assert re.match(r"🤐 OK, I'll stay quiet until (\w{3} )?20:30", stack.gateway.sent[-1].text)
     await chatter(stack, env, "idk")
     await stack.ambient.fire(GROUP_ID)
     assert (await ambient_log(env))[-1]["rule"] == "muted"
@@ -160,7 +161,7 @@ async def test_quiet_and_unquiet_commands(env: Env) -> None:
 async def test_mute_phrase(env: Env) -> None:
     stack = make_stack(env)
     await chatter(stack, env, "ok bot shh")
-    assert stack.gateway.sent[-1].text.startswith("🤐 OK, I'll stay quiet until 21:00")
+    assert re.match(r"🤐 OK, I'll stay quiet until (\w{3} )?21:00", stack.gateway.sent[-1].text)
     assert not stack.ambient._debouncer.pending(GROUP_ID)
 
 

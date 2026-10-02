@@ -12,6 +12,12 @@
   <div class="card"><h3>Database</h3><div class="big">{{ (db_bytes / 1048576) | round(2) }} MB</div><div class="muted small">{{ db_path }}</div></div>
   <div class="card"><h3>Vault</h3><div>{{ counts.notes }} notes, {{ counts.chunks }} chunks, {{ counts.links }} links</div><div class="muted small">{{ vault }}</div></div>
   <div class="card"><h3>Embeddings</h3><div>{{ embed_model }}</div><div class="small {{ 'warn' if counts.pending_chunks else 'muted' }}">{{ counts.pending_chunks }} pending</div></div>
+  <div class="card"><h3>Account reader</h3>
+    {% if health.reader_state == 'revoked' %}<div class="dot bad" role="alert">Session revoked</div>
+    {% elif health.reader_state == 'error' %}<div class="dot bad" role="alert">Error</div>
+    {% elif health.reader_state == 'ok' %}<div class="dot ok">Reading</div>
+    {% else %}<div class="dot muted">Off</div>{% endif %}
+    <div class="small"><a href="/system/reader">Chats, consent, Disconnect</a></div></div>
   <div class="card"><h3>Process</h3><div>up since {{ local(health.started_at) }}</div>
     <div class="muted small">scheduler ticked {{ health.last_tick_at | ago }}</div></div>
 </div>

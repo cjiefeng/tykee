@@ -134,7 +134,8 @@ class SharedPlaces:
 
         def _q(c: sqlite3.Connection) -> list[_Prior]:
             rows = c.execute(
-                "SELECT * FROM messages WHERE chat_id = ? AND thread_id IS ? AND role = 'user' "
+                "SELECT * FROM messages WHERE source = 'bot' AND chat_id = ? AND thread_id IS ? "
+                "AND role = 'user' "
                 "AND id < ? AND created_at >= datetime('now', ?) ORDER BY id DESC LIMIT 5",
                 (chat_id, thread, row_id, window),
             ).fetchall()
@@ -147,7 +148,7 @@ class SharedPlaces:
         row = await self._db.read(
             lambda c: c.execute(
                 "SELECT tg_message_id FROM (SELECT id, tg_message_id, content FROM messages "
-                "WHERE chat_id = ? AND role = 'user' ORDER BY id DESC LIMIT 50) "
+                "WHERE source = 'bot' AND chat_id = ? AND role = 'user' ORDER BY id DESC LIMIT 50) "
                 "WHERE instr(content, ?) > 0 ORDER BY id DESC LIMIT 1",
                 (chat_id, needle),
             ).fetchone()

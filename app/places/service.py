@@ -266,24 +266,49 @@ class PlaceService:
             return AnnotatedText(text)
         if msg.venue is not None:
             v = msg.venue
-            if not links.is_named_business(v.title):
-                return AnnotatedText(f"[location] {LOCATION_SHARED}", unnamed=1)
-            place = await self.upsert(
-                Candidate(
-                    v.title,
-                    venue_url(v.title, v.address, v.google_place_id),
-                    v.address or None,
-                    v.location.latitude,
-                    v.location.longitude,
-                    f"gpid:{v.google_place_id}" if v.google_place_id else None,
-                )
+            return await self.annotate_venue(
+                text,
+                v.title,
+                v.address,
+                v.location.latitude,
+                v.location.longitude,
+                v.google_place_id,
             )
-            return AnnotatedText(f"{text} {place.marker()}", [place])
         if msg.location is not None:
             return AnnotatedText(f"[location] {LOCATION_SHARED}", unnamed=1)
         body = msg.text or msg.caption or ""
         urls = links.urls_in_entities(body, msg.entities or msg.caption_entities or [])
         return await self.annotate_urls(text, urls)
+
+    async def annotate_venue(
+        self,
+        text: str,
+        title: str,
+        address: str | None,
+        lat: float,
+        lng: float,
+        google_place_id: str | None,
+    ) -> AnnotatedText:
+        """A Telegram venue: a named business becomes a place; anything else is an unnamed
+        location (a home is never stored, §10.5). Also used by the account reader (§10.7)."""
+        if not await self._enabled():
+            return AnnotatedText(text)
+        if not links.is_named_business(title):
+            return AnnotatedText(f"[location] {LOCATION_SHARED}", unnamed=1)
+        place = await self.upsert(
+            Candidate(
+                title,
+                venue_url(title, address, google_place_id),
+                address or None,
+                lat,
+                lng,
+                f"gpid:{google_place_id}" if google_place_id else None,
+            )
+        )
+        return AnnotatedText(f"{text} {place.marker()}", [place])
+
+    async def _enabled(self) -> bool:
+        return (await self._settings.load()).places_enabled
 
     async def annotate_urls(self, text: str, urls: Sequence[tuple[str, bool]]) -> AnnotatedText:
         out = AnnotatedText(text)

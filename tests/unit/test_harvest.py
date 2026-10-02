@@ -15,7 +15,7 @@ from app.harvest import NO_TOPIC, Harvester, windows
 from app.llm.client import LLMUnavailable
 from app.settings import set_value
 from app.telegram.topics import KEY_ANSWER
-from app.timeutil import to_sql
+from app.timeutil import to_sql, utcnow
 from tests.conftest import (
     GROUP_ID,
     JACK_TG,
@@ -295,7 +295,7 @@ async def test_budget_warning_pauses_harvest(env: Env) -> None:
     await env.db.write(lambda c: set_value(c, "budget.daily_usd", 1.0))
     stack, h = await setup(env)
     row = usage_repo.UsageRow(
-        env.jack.id, "chat", GROUP_ID, None, "m", 1, 1, 0, 0, 0.85, to_sql(stack.clock())
+        env.jack.id, "chat", GROUP_ID, None, "m", 1, 1, 0, 0, 0.85, to_sql(utcnow())
     )
     await env.db.write(lambda c: usage_repo.insert(c, row))
     await chat(stack, env, FOOD, *["laksa"] * 5)
@@ -450,7 +450,7 @@ async def test_budget_checked_between_windows(env: Env) -> None:
 
     async def costly(req: Any) -> Any:
         row = usage_repo.UsageRow(
-            None, "harvest", GROUP_ID, None, "m", 1, 1, 0, 0, 0.9, to_sql(stack.clock())
+            None, "harvest", GROUP_ID, None, "m", 1, 1, 0, 0, 0.9, to_sql(utcnow())
         )
         await env.db.write(lambda c: usage_repo.insert(c, row))
         return await complete(req)

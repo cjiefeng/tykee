@@ -47,6 +47,12 @@
     {% elif not latest_backup %}<div class="dot warn">none yet</div>
     {% else %}<div class="dot {{ 'warn' if backup_stale else 'ok' }}">last {{ latest_backup.modified | ago }}</div>{% endif %}
     <div class="muted small"><a href="/system">{{ backups | length }} kept</a></div></div>
+  {% if health.reader_state != 'off' %}<div class="card"><h3>Account reader</h3>
+    {% if health.reader_state == 'revoked' %}<div class="dot bad" role="alert">session revoked by Telegram</div>
+    {% elif health.reader_state == 'error' %}<div class="dot bad" role="alert">{{ health.reader_error or 'error' }}</div>
+    {% elif health.reader_state == 'not_logged_in' %}<div class="dot warn">not logged in</div>
+    {% else %}<div class="dot ok">last poll {{ health.reader_last_poll_at | ago }}</div>{% endif %}
+    <div class="muted small"><a href="/system/reader">Chats</a></div></div>{% endif %}
 </div>
 
 {% if spend.by_purpose %}

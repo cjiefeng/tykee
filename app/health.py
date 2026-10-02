@@ -37,6 +37,9 @@ class HealthState:
     last_backup_at: datetime | None = None
     last_backup_error: str | None = None
     last_vault_status: str | None = None
+    reader_state: str = "off"  # §10.7: 'off' | 'not_logged_in' | 'ok' | 'revoked' | 'error'
+    reader_error: str | None = None
+    reader_last_poll_at: datetime | None = None
 
     def backup_done(self, vault_status: str) -> None:
         self.last_backup_at = utcnow()
