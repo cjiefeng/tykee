@@ -168,7 +168,7 @@ class NoteStore:
                 note.meta["avoid_tags"] = sorted(current)
             data = await self._io(self._atomic_write, rel, nt.render(note))
             await self._reindex(rel, data)
-        log.info("note written", extra={"path": rel, "mode": mode, "created": created})
+        log.info("note written", extra={"path": rel, "mode": mode, "new_note": created})
         return WriteResult(rel, created)
 
     async def write_raw(self, path: str, text: str) -> str:
