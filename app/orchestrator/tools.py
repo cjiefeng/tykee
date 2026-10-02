@@ -10,6 +10,7 @@ import json
 import logging
 from collections.abc import Sequence
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Any, Literal
 from zoneinfo import ZoneInfo
 
@@ -22,6 +23,7 @@ from app.db.repos.users import UserRecord
 from app.decisions.categories import Category
 from app.decisions.engine import ExtraCandidate, PickRequest
 from app.decisions.service import DecisionService
+from app.places.service import PlaceService
 
 log = logging.getLogger(__name__)
 
@@ -61,6 +63,14 @@ class AddOptionIn(BaseModel):
     name: str = Field(min_length=1, max_length=120)
     tags: list[str] = Field(default_factory=list)
     owner: str = "shared"
+    place_id: int | None = None
+
+
+class RecordDecisionIn(BaseModel):
+    category: str
+    choice: str = Field(min_length=1, max_length=120)
+    for_users: str | None = None
+    place_id: int | None = None
 
 
 class RecentDecisionsIn(BaseModel):
@@ -230,8 +240,36 @@ def tool_definitions(user_slugs: Sequence[str]) -> list[ToolParam]:
                     "name": {"type": "string"},
                     "tags": _TAGS,
                     "owner": {"type": "string", "enum": [*user_slugs, "shared"]},
+                    "place_id": {
+                        "type": "integer",
+                        "description": "If the option is a shared place, its place_id marker.",
+                    },
                 },
                 "required": ["category", "name", "tags"],
+            },
+        },
+        {
+            "name": "record_decision",
+            "description": (
+                "Record a choice the users already made themselves (no pick needed), e.g. they "
+                "shared a place and said they're eating there. Call resolve_category first. A "
+                "reaction on their message confirms it, so keep any reply to a few words."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "category": {
+                        "type": "string",
+                        "description": "Slug returned by resolve_category.",
+                    },
+                    "choice": {"type": "string", "description": "What they chose."},
+                    "for_users": for_users,
+                    "place_id": {
+                        "type": "integer",
+                        "description": "The place_id from a ⟦place: … · place_id=N⟧ marker.",
+                    },
+                },
+                "required": ["category", "choice"],
             },
         },
         {
@@ -353,6 +391,7 @@ class TurnContext:
     is_group: bool = False
     source: str = ""  # provenance for notes written this turn, e.g. telegram:<chat_id>
     last_picks: list[tuple[int, str]] = field(default_factory=list)  # (decision_id, name)
+    recorded: list[tuple[int, int | None]] = field(default_factory=list)  # (decision, place)
     web_used: bool = False  # a web search/fetch ran this turn → memory writes need approval (§7.5)
 
 
@@ -371,9 +410,15 @@ def _err(message: str) -> ToolOutcome:
 
 
 class ToolRouter:
-    def __init__(self, decisions: DecisionService, memory: MemoryService | None = None) -> None:
+    def __init__(
+        self,
+        decisions: DecisionService,
+        memory: MemoryService | None = None,
+        places: PlaceService | None = None,
+    ) -> None:
         self._d = decisions
         self._m = memory
+        self._p = places
 
     def definitions(self) -> list[ToolParam]:
         tools = tool_definitions(self._d.user_slugs)
@@ -388,6 +433,7 @@ class ToolRouter:
             "list_options": self._list,
             "add_option": self._add,
             "recent_decisions": self._recent,
+            "record_decision": self._record,
             **(
                 {
                     "search_memory": self._search_memory,
@@ -512,8 +558,57 @@ class ToolRouter:
             return _err(f"unknown category {a.category!r}; call resolve_category first")
         if a.owner != "shared" and a.owner not in self._d.user_slugs:
             return _err("owner must be a user slug or 'shared'")
-        added = await self._d.add_option(cat, a.name, a.tags, a.owner)
+        place_id = None
+        if a.place_id is not None:
+            place = await self._p.get(a.place_id) if self._p is not None else None
+            if place is None:
+                return _err(f"unknown place_id {a.place_id}")
+            place_id = place.id
+        added = await self._d.add_option(cat, a.name, a.tags, a.owner, place_id)
         return _ok({"added": added, "note": "" if added else "already exists"})
+
+    async def _record(self, raw: dict[str, Any], ctx: TurnContext) -> ToolOutcome:
+        a = RecordDecisionIn.model_validate(raw)
+        cat = await self._category(a.category)
+        if cat is None:
+            return _err(f"unknown category {a.category!r}; call resolve_category first")
+        for_users = a.for_users or ctx.default_for_users
+        if for_users != "both" and for_users not in self._d.user_slugs:
+            return _err(f"for_users must be one of {[*self._d.user_slugs, 'both']}")
+        choice, place_id = a.choice.strip(), None
+        if a.place_id is not None:
+            place = await self._p.get(a.place_id) if self._p is not None else None
+            if place is None:
+                return _err(f"unknown place_id {a.place_id}")
+            choice, place_id = place.name, place.id
+        r = await self._d.record_user(
+            cat,
+            choice=choice,
+            for_users=for_users,
+            asked_by=ctx.actor.id,
+            chat_id=ctx.chat_id,
+            place_id=place_id,
+        )
+        if r.created:
+            ctx.recorded.append((r.decision_id, place_id))
+            if place_id is not None and self._p is not None:
+                await self._p.visit(place_id)
+            if self._m is not None:
+                await self._m.log_decision(
+                    f"- {datetime.now(ctx.tz):%H:%M} · {cat.display_name} · **{choice}** · "
+                    f"for {for_users} · 📍 by {ctx.actor.display_name}"
+                )
+        log.info("decision recorded", extra={"slug": cat.slug, "new": r.created})
+        return _ok(
+            {
+                "recorded": r.created,
+                "category": cat.slug,
+                "choice": choice,
+                "note": "Done; a reaction confirms it."
+                if r.created
+                else "Already recorded earlier; nothing changed.",
+            }
+        )
 
     async def _recent(self, raw: dict[str, Any], ctx: TurnContext) -> ToolOutcome:
         a = RecentDecisionsIn.model_validate(raw)

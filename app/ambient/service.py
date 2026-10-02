@@ -154,9 +154,7 @@ class AmbientService:
         if today_decisions:
             context_lines.append(
                 "Decisions today: "
-                + "; ".join(
-                    f"{cat}: {choice} ({status})" for cat, choice, status in today_decisions
-                )
+                + "; ".join(f"{d.category}: {d.choice} ({d.status})" for d in today_decisions)
             )
         transcript = format_transcript(
             rows, self._users_by_id, self._tz, marker_before_id=burst.from_msg_id

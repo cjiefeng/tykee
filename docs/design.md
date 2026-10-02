@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **Status** | Draft v1.26 (place recommendations with pet-friendly filter, M9, §10.6; no Google Places API) |
+| **Status** | Draft v1.27 (M8 as built: 👌 reaction since 📍 isn't a bot reaction, code-only "eating here" in the answer topic, §10.5) |
 | **Name** | Tykee: phonetic spelling of Tyche, the Greek goddess of chance. Telegram handle e.g. `@TykeeBot` (must end in "bot") |
 | **Author** | Jack |
 | **Date** | 2026-10-01 |
@@ -995,32 +995,38 @@ URLs are taken from message entities (`url`, `text_link`), not just regex on the
 
 #### Resolving (`PlaceResolver`)
 
-1. **Follow redirects** with `httpx` (`follow_redirects=True`, max 5 hops, 5 s timeout, normal browser User-Agent). Every hop must stay on an **allowlisted host** (`maps.app.goo.gl`, `goo.gl`, `google.com`, `www.google.com`, `maps.google.com`, regional `google.<tld>` variants); anything else aborts. The response body is never read beyond what's needed to get the final URL (streamed and closed). This makes it safe against SSRF.
+1. **Follow redirects** with `httpx`, hop by hop (`follow_redirects=False`, max 5 requests, 5 s for the whole chain, normal browser User-Agent, no proxy from the environment). Only **short links** (`maps.app.goo.gl/…`, `goo.gl/maps/…`) are fetched; full `google.<tld>/maps` links are parsed without any request. Every hop must stay on an **allowlisted host** (`maps.app.goo.gl`, `goo.gl`, `google.com`, `www.google.com`, `maps.google.com`, regional `google.<tld>` / `google.com.<cc>` variants, http(s), default ports, no userinfo); anything else aborts as `blocked_host`. Google's cookie-consent interstitial (`consent.google.<tld>?continue=…`) is unwrapped from its `continue` parameter without fetching it. The response body is never read (the stream is closed after the headers). This makes it safe against SSRF.
 2. **Parse the final URL** (tolerant parser; formats vary, so tests use real shared links as fixtures):
    - `/maps/place/<Name>/@<lat>,<lng>,<zoom>z/data=…!3d<lat>!4d<lng>…` → name = URL-decoded `<Name>` (`+` → space), coordinates from `!3d/!4d` (precise) or `@lat,lng`.
-   - `?q=<name or address>&ftid=0x…:0x…` or `?cid=<n>` → name from `q`, stable id from `ftid`/`cid`.
+   - `?q=<name or address>&ftid=0x…:0x…` or `?cid=<n>` → name from `q`, stable id from `ftid`/`cid`. `q` is often "Name, street, unit, postal code": the part before the first ", " is the name, the rest the address. The second half of an `ftid` is the place's CID, so both are stored as `google_id = 'cid:<n>'` and dedupe with each other (and with `!1s0x…:0x…` inside `data=`).
    - `/maps/search/<query>/@lat,lng…` → name = query (lower confidence).
    - Only coordinates → unnamed place.
-3. **Cache** every resolution in `place_links` (by original URL), so the same link is never fetched twice.
+3. **Cache** every resolution in `place_links` (by original URL), so the same link is never fetched twice. Exception: a *full* link that turns out not to be a business isn't cached, because the URL itself is the address. `final_url` is kept only for `resolved` rows.
 4. **Fallbacks when no name is found:** if M7 is enabled, the orchestrator may use web search on the coordinates when someone actually asks about it; otherwise Tykee asks "which place is this?" only if it's in the answer topic and relevant. **Decided:** the Google Places API is **not** used anywhere in Tykee (cost, API key); all place data comes from links, chat and web search.
 
 #### What happens with a resolved place
 
 1. **Annotate the message** before anything reads it: the stored text gets an inline marker, e.g. `eating here https://maps.app.goo.gl/AbC123 ⟦place: Keisuke Tonkotsu King · Tanjong Pagar · 1.2799,103.8443 · place_id=42⟧`. The orchestrator, speak-or-stay-silent judge, harvester and import all see the shop name without extra work.
 2. **Upsert the place** in `places` (dedupe by `google_id` (ftid/cid) if present, else same normalised name within 75 m) and in the vault as `shared/places/<slug>.md` (`type: place`): name, Maps link, coordinates, first/last mentioned, times visited, plus anything learned later ("partner loves the black garlic broth").
-3. **Record the decision** when the message implies you're going there ("eating here", "let's go this one", a link right after a dinner discussion):
-   - **In the answer topic:** the orchestrator calls `record_decision(category, choice=<place name>, for_users, place_id)`. The category is resolved as usual (§8.1), e.g. dinner/lunch/cafe by time of day and context. The place is also added as an option in that category (`tags: ["place"]`, `place_id`) if not already there. Tykee confirms quietly with a 📍 **reaction** on the message instead of a reply, keeping §10.2's "silent by default".
-   - **In other topics:** the harvester (§10.4) sees the annotation and records an observed decision the same way (existing categories only).
-   - A link shared without intent ("this place looks nice") only creates/updates the place, plus an option suggestion in the inbox, no decision.
-4. **Answering "where are we eating?"** works from today's `decisions` (with `place_id` → name + Maps link). Asking "what was that place we went to in Tanjong Pagar?" works through `search_memory` over place notes.
+3. **Record the decision** when the message implies you're going there ("eating here", "let's go this one"):
+   - **In the answer topic, Tykee not mentioned (decided v1.27: code only, no LLM call):** the message (stripped of links and markers) contains one of `places.intent_phrases`, or one was said in that topic within `places.intent_window_s` (120 s) before the link, or is said within that window after it. The category is the one the messages name (alias/slug match, as in the §8.5 fallback: "dinner here", "lunch here tmr?"), else the household-time **meal slot** in `places.meal_slots` (default 05:00–10:30 breakfast, 10:30–15:00 lunch, 17:00–23:00 dinner; wraps midnight). If that category doesn't exist, nothing is recorded (the place is still kept). Otherwise the decision is stored `status='accepted'`, `source='user'`, `for_users='both'`, `asked_by` = whoever said it, and mirrored to the decision log. Tykee confirms with a **reaction** on the link message instead of a reply, keeping §10.2's "silent by default". The reaction is `places.reaction`, default 👌: 📍 isn't in Telegram's list of emoji bots may react with (the setting only accepts that list). The burst still goes through the ambient judge as usual; "Decisions today" tells it the choice is made.
+   - **When Tykee is addressed (mention, reply, DM):** Claude calls `record_decision(category, choice, for_users, place_id)` after `resolve_category`. With a `place_id` the choice is the place's name. Tykee reacts on the message that shared the place (else the message it answered) and replies with a few words at most; an empty reply sends nothing.
+   - Either way, the place becomes an option in that category (`tags: ["place"]`, `place_id`; an existing option with the same name is linked instead), and the same choice in the same chat and category isn't recorded twice within `decisions.session_hours`. The place's `visit_count` goes up.
+   - **In other topics:** the harvester (§10.4) sees the annotation and records an observed decision the same way (existing categories only). An extracted choice or option matching a marker's name (normalised, or rapidfuzz ≥ 90) gets that `place_id` and the place's canonical name.
+   - A link shared without intent ("this place looks nice") only creates/updates the place, plus an option suggestion in the inbox for the category the message or meal slot gives (once; not if it's already an option), no decision.
+4. **Answering "where are we eating?"** works from today's `decisions` (with `place_id` → name + Maps link), listed under "Decisions today" in the orchestrator's dynamic context ([4] in §7.2). Asking "what was that place we went to in Tanjong Pagar?" works through `search_memory` over place notes.
 
 #### Privacy rule (safe topics, §15.4)
 
-Only **named businesses** become places. A link or pin that resolves to just coordinates, a street address, a postal code or a residential building (e.g. someone's home) is **not stored** as a place, note or option; the annotation is reduced to `⟦location shared⟧`.
+Only **named businesses** become places. A link or pin that resolves to just coordinates, a street address, a postal code or a residential building (e.g. someone's home) is **not stored** as a place, note or option; the annotation is reduced to `⟦location shared⟧`, and a visible link is **replaced** by it in the stored text, so the address never reaches history, the judge, the harvester or Claude.
+
+"Named business" is a deliberately strict heuristic on the name part: rejected if empty, coordinates (decimal or degrees), a plus code, "home"/"my place", a block/house number followed by a street word ("123 Tampines St 11", "Blk 123 …"), a name ending in a street word ("Orchard Road"), a unit number (`#12-34`), a 5–6 digit postal code, or residential words (residences, condo, apartment, HDB, flat). Losing a shop that looks like an address is acceptable; keeping a home isn't. Telegram **location** pins are stored as `[location] ⟦location shared⟧` (never coordinates); **venues** as `[venue] <title>` plus the marker, through the same rule.
 
 #### Import (M5 enhancement shipped in M8)
 
 During import (§15.3), Maps links in the exported text are resolved **before** extraction (rate-limited to 1 request/s, cached), so Opus sees shop names in decision episodes and seeds places and options from six months of history.
+
+As built: links hidden behind link text (`text_link` entities in the export) are kept as `text (url)` when flattening. Resolution runs at the start of the extraction step, just before the batch is submitted (not at configure, so the dashboard request stays fast); window text gets markers without a `place_id`, and unnamed links are replaced by `⟦location shared⟧`. Nothing is stored as a place before review: the resolved links are remembered in the job, and at **apply** a link becomes a place only if an applied option or imported decision names it (normalised or rapidfuzz ≥ 90). Those rows get its `place_id`, imported decisions count as visits, and the apply summary reports `places`.
 
 #### Data model (M8 migration)
 
@@ -1028,8 +1034,10 @@ During import (§15.3), Maps links in the exported text are resolved **before** 
 CREATE TABLE places (
   id             INTEGER PRIMARY KEY,
   name           TEXT NOT NULL,
-  google_id      TEXT UNIQUE,                 -- ftid or cid, when present
+  name_norm      TEXT NOT NULL,               -- normalised name, for dedupe
+  google_id      TEXT UNIQUE,                 -- 'cid:<n>' (ftid/cid) or 'gpid:<id>' (venue)
   lat            REAL, lng REAL,
+  address        TEXT,                        -- when the link or venue carries one
   maps_url       TEXT NOT NULL,               -- canonical link to send back
   note_path      TEXT,                        -- shared/places/<slug>.md
   first_seen_at  TEXT NOT NULL, last_seen_at TEXT NOT NULL,
@@ -1041,6 +1049,8 @@ CREATE TABLE place_links (                     -- resolver cache
   final_url      TEXT,
   place_id       INTEGER REFERENCES places(id),
   status         TEXT NOT NULL,                -- 'resolved'|'unnamed'|'failed'|'blocked_host'
+  error          TEXT,
+  attempts       INTEGER NOT NULL DEFAULT 1,
   resolved_at    TEXT NOT NULL
 );
 
@@ -1051,7 +1061,16 @@ ALTER TABLE decisions ADD COLUMN place_id INTEGER REFERENCES places(id);
 
 #### Failure handling
 
-Resolver errors (timeout, Google consent/interstitial page, blocked host, unparseable URL) never break message handling: the message is stored as-is, `place_links.status` records the failure, and it's retried once by the nightly job. Dashboard → Memory → **Places** lists places (rename, merge duplicates, delete) and recent link resolutions with their status.
+Resolver errors (timeout, Google consent/interstitial page, blocked host, unparseable URL) never break message handling: the message is stored as-is, `place_links.status` records the failure, and it's retried once later (as built: an hourly job retries `failed` links at least 6 h old, `attempts < 2`; on success the stored messages are patched with the marker, or with `⟦location shared⟧` if it was a home). Dashboard → Memory → **Places** lists places (rename, merge duplicates, delete) and recent link resolutions with their status.
+
+#### Implementation notes (M8)
+
+- **Modules:** `app/places/links.py` (pure: detection, host allowlist, URL parser, privacy rule, markers), `resolver.py` (`PlaceResolver`, the only code that fetches Maps links), `service.py` (`PlaceService`: annotate, upsert/dedupe, notes, visits, rename/merge/delete, retry, import adoption), `intent.py` + `decide.py` (`SharedPlaces`: the code-only answer-topic path and the reactions for `record_decision`). The adapter annotates right after the topic gate's drop step and before storing.
+- **Dedupe:** same `google_id`, else same normalised name and (when both have coordinates) within 75 m. Two ids of the same scheme that differ are different places; a venue's `gpid:` and a link's `cid:` can still match by name and distance.
+- **Place notes:** `shared/places/<slug>.md` (`-<id>` suffix on a slug clash; an existing note at that path, e.g. one Claude wrote, is reused). Code owns only the generated bullets of a `## Details` section (Maps link, address, coordinates, first/last mentioned, visits) and rewrites them on creation, a mention on a new day, a visit, rename or merge. Every other line is kept, including lines appended without a heading that land inside Details. Merging appends the other note's own content under "From <name>" and deletes it.
+- **Settings** (Memory → Places, also in raw Settings): `places.enabled` (true), `places.reaction` (👌, Telegram's bot reaction list only), `places.intent_phrases`, `places.intent_window_s` (120), `places.meal_slots`.
+- **Persona rules** explain markers, `record_decision` and answering from "Decisions today"; Claude never writes markers itself. `add_option` takes an optional `place_id`.
+- **Telegram:** `ChatGateway.set_reaction` (`setMessageReaction`); failures are logged, never raised.
 
 ### 10.6 Place recommendations, incl. pet-friendly (M9)
 
@@ -1176,7 +1195,7 @@ Dashboard → Memory → **Places** gains: attribute view/edit with source and d
 ```sql
 ALTER TABLE places ADD COLUMN status  TEXT NOT NULL DEFAULT 'visited';  -- 'visited' | 'unvisited'
 ALTER TABLE places ADD COLUMN area_id INTEGER REFERENCES areas(id);
-ALTER TABLE places ADD COLUMN address TEXT;                              -- from link or web result
+-- places.address already exists (added in M8's migration 0010); M9 only starts filling it from web results
 
 CREATE TABLE areas (
   id         INTEGER PRIMARY KEY,
@@ -1249,7 +1268,7 @@ All settings are read from SQLite on each request, so changes apply instantly wi
 | Bot memory/state leaking into the code repo | Memory (vault), the SQLite DB and its WAL/SHM, the model cache, backups and imports live under `/data`, which on the NAS is outside the repo. Belt and braces: `.gitignore` ignores them by file shape wherever `TYKEE_DATA_DIR` points (`*.db*`, `vault/`, `models--*/`, `*.onnx`, `**/imports/*.json\|zip`), `.dockerignore` keeps them out of the image, `deploy.sh` refuses to start if the data dir is inside the repo and not ignored, and CI fails any PR that tracks such a file (§14.5). The vault's own nightly git commit (§14.2) is a separate local repo with **no remote**. |
 | Prompt injection via notes / user text | Tools are narrow; `write_note` path-restricted to vault folders; pinned notes immutable implicitly; no shell tools. The only network access is Anthropic's server-side web search/fetch (M7). |
 | Prompt injection / bad data via web content (M7) | Web results treated as untrusted data; web-sourced memories always require human approval in the inbox; web tools only on the orchestrator call; optional domain allow/block lists; daily search cap (§7.5). |
-| SSRF via pasted links (M8) | `PlaceResolver` only follows redirects on allowlisted Google Maps hosts, max 5 hops, 5 s timeout, never reads response bodies; all other URLs are left untouched. |
+| SSRF via pasted links (M8) | `PlaceResolver` only fetches Maps short links and follows redirects hop by hop on allowlisted Google hosts (http(s), default ports, no userinfo, no env proxy), max 5 requests in 5 s, never reads response bodies; all other URLs are left untouched. |
 | Path traversal in note paths | Resolve and enforce `vault_root in path.parents`; reject symlinks. |
 | Bot reads all group messages | Only the configured group and allowlisted senders are persisted; topics in `telegram.ignored_topic_ids` are dropped unread. Other topics are read and stored with `thread_id` and sent to Anthropic only in harvester batches (Haiku-tier, topic allowlist, §10.4); Tykee speaks only in the answer topic. Both users know the bot is listening (stated on join). |
 | Cross-user leakage (in chat) | Owner filter in retrieval and pinned injection; one user's private memories only enter the other's chat when `for_users=both`, and then only constraint-type notes. **Accepted:** facts learned in a DM (`memories/<slug>/`) can surface in group answers, since the group defaults to `for_users=both`. No per-note `private` flag. |
@@ -1578,7 +1597,7 @@ Both people's raw messages are sent to the Anthropic API during extraction, so b
 | M5 | Bootstrap import: dashboard upload wizard (§15.2), Telegram JSON/zip parser (single chat + full account), windowing, batch extraction, consolidation, review UI, apply; decision-episode extraction (§15.3.1), **Opus-designed categories** with review/merge (§15.3.2), three-layer safe-topic enforcement (§15.4) | 6 months of history reviewed and applied; bot knows both users on day one. Categories reflect the decisions you actually discussed; nothing about health, money, work or relationship talk is stored. |
 | M6 | Scheduled nudges (optional), backups, healthcheck, polish, runbook | Runs unattended for 2 weeks. |
 | M7 | Web access (§7.5): web search + fetch server tools on the orchestrator call, `web.*` settings + dashboard toggles, persona rules, web-sourced memory → inbox only, usage/cost recording of searches & fetches, daily cap + budget-based disable, error fallback | "Is that new ramen place in Tanjong Pagar any good?" gets a short, cited answer; a web fact never lands in the vault without approval; tests pass offline with web tools faked. |
-| M8 | Google Maps links → places (§10.5): entity-based link detection incl. Telegram venue/location messages, `PlaceResolver` (allowlisted redirects, tolerant URL parser, cache), message annotation, `places` + vault place notes, `record_decision` tool + 📍 reaction, harvester support, import pre-resolution, named-business-only privacy rule, dashboard Places list. **Independent of M7**; can be built before it. | Pasting a Maps link with "eating here" in #Tykee gets a 📍 reaction, "where are we eating?" answers with the shop name and link, and a link to someone's home is never stored. |
+| M8 | Google Maps links → places (§10.5): entity-based link detection incl. Telegram venue/location messages, `PlaceResolver` (allowlisted redirects, tolerant URL parser, cache), message annotation, `places` + vault place notes, `record_decision` tool + reaction, harvester support, import pre-resolution, named-business-only privacy rule, dashboard Places list. **Independent of M7**; can be built before it. | Pasting a Maps link with "eating here" in #Tykee gets a 👌 reaction (📍 isn't a bot reaction; `places.reaction`), "where are we eating?" answers with the shop name and link, and a link to someone's home is never stored. |
 | M9 | Place recommendations (§10.6): `areas` gazetteer seed (planning areas, subzones, MRT/LRT, aliases) + user neighbourhood areas, `find_places` / `save_place_candidates` / `set_place_attribute` tools, `place_attributes` with provenance (`user` vs `web`, TTL), pet-friendly must-have filter incl. `outdoor_only`, pets in `household.md`, code ranking + weighted random + explore slot, web discovery with search-URL map links, 🎲 more, dashboard Places/Recommendations settings. **No Google Places API.** Depends on M7 + M8. | "Brunch around Tiong Bahru, pet friendly" returns 3 picks with Map links and labelled pet-friendly sources; a user-confirmed attribute beats a web one; "near home" never uses an exact address. |
 
 Deferred / later: voice notes (requires separate STT), photo input (fridge contents, works with Claude vision), weather context, WhatsApp import parser.

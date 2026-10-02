@@ -33,6 +33,7 @@ from app.orchestrator.orchestrator import (
     bold_list,
     default_for_users,
 )
+from app.places.decide import SharedPlaces
 from app.telegram.addressing import (
     BotIdentity,
     Command,
@@ -94,7 +95,9 @@ class TelegramAdapter:
         memory: MemoryService | None = None,
         topics: TopicService | None = None,
         health: HealthState | None = None,
+        places: SharedPlaces | None = None,
     ) -> None:
+        self._places = places
         self._topics = topics
         self._health = health
         self._memory = memory
@@ -144,6 +147,11 @@ class TelegramAdapter:
                 return  # ignored topic (§10.4): never stored, never sent anywhere
         kind = classify(msg)
         text = stored_text(msg, kind)
+        found = None
+        if self._places is not None:
+            # §10.5: before anything reads it, so every consumer sees the shop name.
+            found = await self._places.places.annotate(msg, text)
+            text = found.text
         content = messages_repo.text_content(text)
         row_id = await self._db.write(
             lambda conn: messages_repo.insert(
@@ -178,6 +186,16 @@ class TelegramAdapter:
                 return
             await self._ambient.check_negative_text(chat_id, text)
         if not addressed:
+            if self._places is not None and found is not None:
+                await self._places.on_chatter(
+                    chat_id=chat_id,
+                    thread=thread,
+                    row_id=row_id,
+                    tg_message_id=msg.message_id,
+                    actor=actor,
+                    text=text,
+                    found=found,
+                )
             await self._ambient.on_chatter(chat_id, row_id, actor, kind, text)
             return
         if is_group:
@@ -190,14 +208,17 @@ class TelegramAdapter:
         # /remember and /forget go to Claude as-is; the rules tell it to use write_note.
         async with self._gateway.typing(chat_id, send_thread(thread)):
             reply = await self._orchestrator.respond(chat, actor, text)
-        await self._send(
-            chat_id,
-            reply.text,
-            reply_to=msg.message_id if is_group else None,
-            picks=reply.picks,
-            store=reply.from_llm,
-            thread=thread,
-        )
+        if self._places is not None:
+            await self._places.confirm(chat_id, reply.recorded, msg.message_id)
+        if reply.text:
+            await self._send(
+                chat_id,
+                reply.text,
+                reply_to=msg.message_id if is_group else None,
+                picks=reply.picks,
+                store=reply.from_llm,
+                thread=thread,
+            )
         if reply.budget_exhausted:
             await self._notify_budget()
 
@@ -507,7 +528,9 @@ class TelegramAdapter:
         thread = await self._group_thread()
         chat = ChatContext(chat_id, is_group=True, thread=await self._history_thread(chat_id, True))
         reply = await self._orchestrator.respond(chat, actor, text, unprompted_reason=reason)
-        if not reply.from_llm and not reply.picks:
+        if self._places is not None:
+            await self._places.confirm(chat_id, reply.recorded, None)
+        if not reply.text or (not reply.from_llm and not reply.picks):
             return None
         ids = await self._send(
             chat_id, reply.text, picks=reply.picks, store=reply.from_llm, thread=thread

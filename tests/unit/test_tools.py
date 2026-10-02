@@ -18,6 +18,7 @@ async def test_definitions_cover_m2_tools(env: Env) -> None:
         "random_pick",
         "list_options",
         "add_option",
+        "record_decision",
         "recent_decisions",
     ]
     pick = next(t for t in router.definitions() if t["name"] == "random_pick")

@@ -40,6 +40,9 @@ from app.logging import LOG_BUFFER, setup_logging
 from app.nudges import NudgeService
 from app.orchestrator.orchestrator import Orchestrator
 from app.orchestrator.summary import Summarizer
+from app.places.decide import SharedPlaces
+from app.places.resolver import PlaceResolver
+from app.places.service import PlaceService
 from app.scheduler import Scheduler
 from app.settings import SettingsStore, seed_settings
 from app.telegram.adapter import TelegramAdapter
@@ -145,6 +148,18 @@ async def run(env: Env) -> None:
         decisions = DecisionService(
             db=db, settings=settings, users=users, constraints=memory.avoid_tags
         )
+        places = PlaceService(
+            db=db, settings=settings, resolver=PlaceResolver(db), tz=tz, store=store
+        )
+        shared_places = SharedPlaces(
+            db=db,
+            settings=settings,
+            places=places,
+            decisions=decisions,
+            react=gateway.set_reaction,
+            tz=tz,
+            memory=memory,
+        )
         registry = GroupRegistry(db, group_id)
         topics = TopicService(db=db, settings=settings, group_id=lambda: registry.group_id)
         inbox_appliers.register(memory, decisions)
@@ -165,6 +180,7 @@ async def run(env: Env) -> None:
             tz=tz,
             summarizer=summarizer,
             memory=memory,
+            places=places,
         )
         ambient = AmbientService(
             db=db,
@@ -189,6 +205,7 @@ async def run(env: Env) -> None:
             memory=memory,
             topics=topics,
             health=health,
+            places=shared_places,
         )
         dp = Dispatcher()
         dp.update.outer_middleware(
@@ -206,6 +223,7 @@ async def run(env: Env) -> None:
             tz=tz,
             group_id=lambda: registry.group_id,
             health=health,
+            places=places,
         )
         importer = ImportService(
             db=db,
@@ -216,6 +234,7 @@ async def run(env: Env) -> None:
             users=users,
             tz=tz,
             imports_dir=env.data_dir / "imports",
+            places=places,
         )
         importer.sweep()
         nudges = NudgeService(
@@ -241,6 +260,7 @@ async def run(env: Env) -> None:
         scheduler.every_minute("nudges", nudges.tick)
         scheduler.every_minute("backup", backups.tick)
         scheduler.every("embed_retry", store.retry_pending, minutes=60)
+        scheduler.every("place_retry", places.retry_failed, minutes=60)
         scheduler.start()
         beat_task = asyncio.create_task(heartbeat(health, env.data_dir / HEARTBEAT_FILE))
         watchdog = Watchdog(health)
@@ -271,6 +291,7 @@ async def run(env: Env) -> None:
                     importer=importer,
                     nudges=nudges,
                     backups=backups,
+                    places=places,
                 )
             )
             dashboard = make_server(dashboard_app, env.dashboard_host, env.dashboard_port)
@@ -293,6 +314,7 @@ async def run(env: Env) -> None:
             scheduler.shutdown()
             await ambient.close()
             await summarizer.close()
+            await places.resolver.close()
             embedder.close()
     finally:
         await bot.session.close()

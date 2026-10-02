@@ -1,0 +1,48 @@
+{% extends "base.html" %}
+{% block title %}Places{% endblock %}
+{% block content %}
+<a class="crumb" href="/memory">Memory</a>
+<div class="page-head"><div><h1>Places</h1>
+  <p class="lede">Shops and venues from Google Maps links shared in the chat. Only named businesses are kept; a link to a home or a bare address is never stored.</p></div></div>
+
+<div class="table-wrap"><table><tr><th>Place</th><th>Visits</th><th>Last mentioned</th><th>Rename</th><th>Merge into</th><th></th></tr>
+{% for p in places %}
+<tr><td><a href="{{ p.maps_url }}" target="_blank" rel="noopener noreferrer">{{ p.name }}</a>
+  {% if p.note_path %}<div class="small"><a href="/memory/note?path={{ p.note_path | urlencode }}">{{ p.note_path }}</a></div>{% endif %}
+  {% if p.address %}<div class="muted small">{{ p.address }}</div>{% endif %}</td>
+<td>{{ p.visit_count }}</td>
+<td class="small">{{ local(p.last_seen_at) }}</td>
+<td><form method="post" action="/memory/places/{{ p.id }}/rename" class="inline">{{ csrf_input }}
+  <input type="text" name="name" aria-label="New name for {{ p.name }}" value="{{ p.name }}" style="max-width:220px"><button class="sm">Save</button></form></td>
+<td>{% if places | length > 1 %}<form method="post" action="/memory/places/{{ p.id }}/merge" class="inline" onsubmit="return confirm('Merge {{ p.name }} into the selected place? Decisions, options and notes move over.')">{{ csrf_input }}
+  <select name="into" aria-label="Merge {{ p.name }} into" style="max-width:200px">{% for o in places if o.id != p.id %}<option value="{{ o.id }}">{{ o.name }}</option>{% endfor %}</select><button class="sm">Merge</button></form>{% endif %}</td>
+<td><form method="post" action="/memory/places/{{ p.id }}/delete" class="inline" onsubmit="return confirm('Delete {{ p.name }} and its note?')">{{ csrf_input }}<button class="sm danger">Delete</button></form></td></tr>
+{% else %}<tr><td colspan="6">No places yet. Share a Google Maps link in the group and it shows up here.</td></tr>{% endfor %}
+</table></div>
+
+<h2>Recent links</h2>
+<div class="table-wrap"><table><tr><th>Link</th><th>Status</th><th>Place</th><th>Tries</th><th>When</th></tr>
+{% for l in links %}
+<tr><td class="small"><code>{{ l.url | truncate(60, true) }}</code></td>
+<td><span class="pill{% if l.status == 'resolved' %} accent{% endif %}">{{ l.status }}</span>{% if l.error %} <span class="muted small">{{ l.error }}</span>{% endif %}</td>
+<td>{{ l.place_name or '' }}</td><td>{{ l.attempts }}</td><td class="small">{{ local(l.resolved_at) }}</td></tr>
+{% else %}<tr><td colspan="5">No links resolved yet.</td></tr>{% endfor %}
+</table></div>
+<p class="help"><b>unnamed</b>: coordinates, an address or a home, so nothing was stored. <b>failed</b> links get one more try a few hours later.</p>
+
+<h2>Settings</h2>
+<form method="post" action="/memory/places/settings" class="form-panel">{{ csrf_input }}
+  <label class="check"><input type="checkbox" name="places.enabled" {{ 'checked' if s.places_enabled }}> Resolve Google Maps links and venues</label>
+  <div class="row">
+    <div><label for="p-reaction">places.reaction</label><select id="p-reaction" name="places.reaction">{% for r in reactions %}<option {{ 'selected' if r == s.places_reaction }}>{{ r }}</option>{% endfor %}</select></div>
+    <div><label for="p-window">places.intent_window_s</label><input id="p-window" type="number" min="0" max="3600" name="places.intent_window_s" value="{{ s.places_intent_window_s }}"></div>
+  </div>
+  <div class="row">
+    <div><label for="p-phrases">places.intent_phrases (one per line)</label><textarea id="p-phrases" name="places.intent_phrases" rows="8">{{ s.places_intent_phrases | join('\n') }}</textarea></div>
+    <div><label for="p-slots">places.meal_slots (<code>HH:MM-HH:MM category</code> per line)</label><textarea id="p-slots" name="places.meal_slots" rows="8">{% for m in s.places_meal_slots %}{{ m.start }}-{{ m.end }} {{ m.category }}
+{% endfor %}</textarea></div>
+  </div>
+  <p class="help">In the answer topic, a shared place plus one of these phrases (in the same message, or within the window before or after it) is recorded as a decision and confirmed with the reaction. The category is the one the message names ("dinner here"), else the meal slot's; a slot whose category doesn't exist records nothing.</p>
+  <div class="actions"><button class="primary">Save place settings</button></div>
+</form>
+{% endblock %}

@@ -36,6 +36,8 @@ from app.llm.client import (
     LLMRequest,
     budget_status,
 )
+from app.places import links as place_links
+from app.places.service import PlaceService
 from app.settings import RuntimeSettings, SettingsStore
 from app.telegram.topics import TopicService
 from app.timeutil import from_sql, to_sql, utcnow
@@ -109,6 +111,9 @@ considered, and the outcome. choice is the chosen option when outcome is "chosen
 is the ISO time of the decision.
 - options: specific named options mentioned for a kind of decision (a restaurant, a show), with \
 sentiment -1..1.
+- ⟦place: Name · … · place_id=N⟧ after a link marks a Google Maps place someone shared: use \
+Name exactly as the option name or choice. "⟦location shared⟧" is an unnamed location or a \
+home: never extract anything about it.
 Return empty lists when there's nothing."""
 
 
@@ -155,8 +160,10 @@ class Harvester:
         tz: ZoneInfo,
         group_id: Callable[[], int | None],
         health: HealthState | None = None,
+        places: PlaceService | None = None,
         clock: Callable[[], datetime] = utcnow,
     ) -> None:
+        self._places = places
         self._db = db
         self._settings = settings
         self._llm = llm
@@ -343,7 +350,10 @@ class Harvester:
             self._bad_output.pop((b.thread_id, win[0].id), None)
             last = win[-1]
             source = f"topic:{topic_name}/msg:{last.tg_message_id or last.id}"
-            await self._apply(extraction, result, source, topic_name, from_sql(last.created_at))
+            marked = [a for r in win for a in place_links.annotations_in(r.text)]
+            await self._apply(
+                extraction, result, source, topic_name, from_sql(last.created_at), marked
+            )
             # Advance per window: a later failure must not re-propose what already landed.
             await self._advance(group, b.thread_id, last.id)
             prior = [self._line(r) for r in win[-s.harvest_context_messages :]]
@@ -360,7 +370,13 @@ class Harvester:
         return await self._record(group, b, new, result)
 
     async def _apply(
-        self, ex: Extraction, result: RunResult, source: str, topic: str, fallback_ts: datetime
+        self,
+        ex: Extraction,
+        result: RunResult,
+        source: str,
+        topic: str,
+        fallback_ts: datetime,
+        marked: Sequence[place_links.Annotated] = (),
     ) -> None:
         result.skipped_out_of_scope += ex.skipped_out_of_scope
         for fact in ex.facts:
@@ -410,13 +426,20 @@ class Harvester:
                     result.suggestions += 1
                 continue
             for_users = ep.for_users if ep.for_users in (*self._slugs, "both") else "both"
+            choice = ep.choice.strip()
+            place = None
+            if (pid := place_links.match_place(choice, marked)) is not None and self._places:
+                place = await self._places.get(pid)
             await self._decisions.record_observed(
                 category,
-                choice=ep.choice.strip(),
+                choice=place.name if place else choice,
                 for_users=for_users,
                 at=_parse_ts(ep.ts, fallback_ts, self._tz),
                 chat_id=self._group_id(),
+                place_id=place.id if place else None,
             )
+            if place is not None and self._places is not None:
+                await self._places.visit(place.id)
             result.decisions += 1
 
         for opt in ex.options:
@@ -426,12 +449,19 @@ class Harvester:
             known = {o.name.casefold() for o in await self._decisions.list_options(category)}
             if opt.name.strip().casefold() in known:
                 continue
+            payload: dict[str, object] = {
+                "category_id": category.id,
+                "name": opt.name.strip(),
+                "tags": opt.tags,
+            }
+            if (pid := place_links.match_place(opt.name, marked)) is not None:
+                payload["place_id"] = pid
             await self._memory.suggest(
                 kind="option",
                 content=f"New {category.display_name.lower()} option: {opt.name}",
                 reason=f"Mentioned in {topic}",
                 source=source,
-                payload={"category_id": category.id, "name": opt.name.strip(), "tags": opt.tags},
+                payload=payload,
             )
             result.suggestions += 1
 
