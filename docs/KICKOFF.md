@@ -10,7 +10,7 @@ This folder currently contains only `docs/design.md` and this file (`docs/KICKOF
 
 ## How we'll work
 1. **Plan first.** After reading the doc, give me: (a) a proposed repo layout, (b) the M1 task breakdown, (c) any contradictions, gaps or risky assumptions you found in the design, with a recommendation for each. Wait for my go-ahead before writing code.
-2. **Work milestone by milestone** (§16): M1 → M2 → M2b → M3 → M4 → M5 → M6 → M7. Stop at the end of each milestone, summarise what was built, how to run/verify it, and what deviated from the design. Don't start the next milestone until I say so.
+2. **Work milestone by milestone** (§16): M1 → M2 → M2b → M3 → M4 → M5 → M6 → M7 → M8. Stop at the end of each milestone, summarise what was built, how to run/verify it, and what deviated from the design. Don't start the next milestone until I say so.
 3. **Don't silently deviate from the design.** If something in the doc is wrong or impractical, stop and propose the change. If I approve, update `docs/design.md` in the same commit so the doc stays true.
 4. **Create a `CLAUDE.md`** at the start with: project summary, commands (run, test, lint, migrate, docker build), conventions below, and a pointer to `docs/design.md`. Keep it updated.
 5. **Commit** at sensible checkpoints with clear messages; never commit secrets.
