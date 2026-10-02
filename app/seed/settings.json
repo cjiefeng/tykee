@@ -47,6 +47,7 @@
   "backup.time": "03:00",
   "backup.keep": 14,
   "web.enabled": true,
+  "web.tier": "escalated",
   "web.search_max_uses": 3,
   "web.fetch_max_uses": 2,
   "web.fetch_max_content_tokens": 4000,

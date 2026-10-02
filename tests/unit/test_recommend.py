@@ -314,6 +314,10 @@ async def test_web_discovery_fills_the_explore_slot(env: Env) -> None:
 
     out = result(stack, 2)
     assert out["suggest_web"] is True and "save_place_candidates" in out["note"]
+    # suggest_web hands the rest of the turn to the web tier with the web tools (§7.5).
+    roles = [r.model_role for r in stack.llm.requests]
+    assert roles == ["default", "default", "escalated", "escalated"]
+    assert "web_search" in [t["name"] for t in stack.llm.requests[2].tools]
     # Both known pet-friendly places have been visited; the explore slot is left for the web.
     assert [p["name"] for p in out["picks"]] == ["Merci Marcel", "Ottomani"]
 

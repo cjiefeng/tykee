@@ -60,7 +60,8 @@ It runs as one Python 3.12 asyncio process with SQLite, in a single Docker conta
 - **Thinking harder:** replies normally use Haiku. `/think <question>` (or saying "think hard",
   "help us plan", or a long message) answers with Sonnet; `/thinkharder` (or "think even harder")
   with Opus. The phrases are editable on the dashboard's Behaviour page; past 80% of the budget
-  it always uses the default model.
+  it always uses the default model. Replies that need a web search switch to Sonnet for that
+  reply (`web.tier`), since Haiku isn't good at web research; everything else stays on Haiku.
 
 Commands: `/pick`, `/options`, `/remember`, `/forget`, `/think`, `/thinkharder`, `/quiet`,
 `/unquiet`, `/inbox`, `/settopic`, `/help` (see design §10).

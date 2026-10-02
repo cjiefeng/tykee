@@ -50,6 +50,9 @@
   {{ searches_today }} of {{ s.web_daily_search_cap }} searches used today.</p>
 <form method="post" action="/behaviour/web" class="form-panel">{{ csrf_input }}
   <label class="check"><input type="checkbox" name="web.enabled" {{ 'checked' if s.web_enabled }}> Web search and fetch enabled</label>
+  <div class="row"><div><label for="w-tier">web.tier: model for replies that use the web</label>
+    <select id="w-tier" name="web.tier">{% for t in roles if t in ['default', 'escalated', 'deep'] %}<option value="{{ t }}" {{ 'selected' if s.web_tier == t }}>{{ t }} ({{ s.model_for(t) }})</option>{% endfor %}</select></div></div>
+  <p class="help">Below this tier a reply gets <code>look_up_web</code> instead of the web tools; when it needs the web (or a place search asks for new places) the rest of that reply moves to this model. Replies that never need the web stay on <code>models.default</code>. <code>default</code> offers the web tools on every reply.</p>
   <div class="row">
     {% for key in web_numbers %}<div><label for="w-{{ loop.index }}">{{ key }}</label><input id="w-{{ loop.index }}" type="number" step="any" min="0" name="{{ key }}" value="{{ raw.get(key, '') }}"></div>{% endfor %}
   </div>
@@ -62,7 +65,7 @@
     <div><label for="w-allow">web.allowed_domains (one per line)</label><textarea id="w-allow" name="web.allowed_domains">{{ s.web_allowed_domains | join('\n') }}</textarea></div>
     <div><label for="w-block">web.blocked_domains (one per line)</label><textarea id="w-block" name="web.blocked_domains">{{ s.web_blocked_domains | join('\n') }}</textarea></div>
   </div>
-  <p class="help">Set allowed or blocked domains, not both. Country is a two-letter code (SG).
+  <p class="help">Set allowed or blocked domains, not both. Country is a two-letter code; leave it blank for Singapore (SG isn't supported).
   <code>pricing.web_search</code> is USD per search; <code>web.fetch_max_uses</code> 0 turns fetching off.
   Tool versions are in <a href="/settings">Settings</a> (<code>web.tool_versions</code>). Facts found on the web always go to the memory inbox.</p>
   <div class="actions"><button class="primary">Save web settings</button></div>

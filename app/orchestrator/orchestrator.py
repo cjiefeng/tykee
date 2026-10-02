@@ -37,12 +37,14 @@ from app.llm.client import (
     budget_status,
 )
 from app.orchestrator import escalation
-from app.orchestrator.escalation import Tier
+from app.orchestrator.escalation import TIER_RANK, Tier
 from app.orchestrator.history import build_messages
 from app.orchestrator.prompt import build_system, dynamic_context
 from app.orchestrator.summary import Summarizer
-from app.orchestrator.tools import ToolRouter, TurnContext
+from app.orchestrator.tools import ToolOutcome, ToolRouter, TurnContext
 from app.orchestrator.web import (
+    HANDOFF_TOOL,
+    handoff_tool,
     server_calls,
     sources,
     used_web,
@@ -211,7 +213,7 @@ class Orchestrator:
         if not web.on and web.reason != "disabled":
             log.info("web tools off", extra={"reason": web.reason})
 
-        def system_for(web_on: bool) -> list[Any]:
+        def system_for(web_on: bool, handoff: bool = False) -> list[Any]:
             return build_system(
                 s.persona_system_prompt,
                 dynamic_context(
@@ -228,6 +230,7 @@ class Orchestrator:
                 ),
                 pinned=pinned,
                 web=web_on,
+                web_handoff=handoff,
             )
 
         choice = await self._tier(text, s, forced, unprompted_reason is not None)
@@ -240,11 +243,21 @@ class Orchestrator:
             try:
                 extra = web_tools(s) if web.on else []
                 ctx.web_on = bool(extra)
-                resp = await self._loop(system_for(bool(extra)), messages, ctx, [*tools, *extra])
-                if extra and self._health is not None:
+                # §7.5: below web.tier, offer look_up_web; the web tools (and the stronger model)
+                # join the turn only once it's needed.
+                handoff = bool(extra) and TIER_RANK[ctx.tier] < TIER_RANK[s.web_tier]
+                first = [handoff_tool()] if handoff else extra
+                resp = await self._loop(
+                    system_for(bool(extra), handoff),
+                    messages,
+                    ctx,
+                    [*tools, *first],
+                    handoff=(extra, s.web_tier, s.escalation_max_tokens) if handoff else None,
+                )
+                if ctx.web_sent and self._health is not None:
                     self._health.web_ok()
             except LLMBadRequest as e:
-                if not web.on or ctx.web_used:
+                if not ctx.web_sent or ctx.web_used:
                     raise
                 # e.g. web search disabled for the org in the Console: answer without the web.
                 log.warning(
@@ -291,23 +304,33 @@ class Orchestrator:
         messages: list[MessageParam],
         ctx: TurnContext,
         tools: list[ToolUnionParam],
+        handoff: tuple[list[ToolUnionParam], Tier, int] | None = None,
     ) -> LLMResponse:
+        """``handoff``: (web tools, tier, max_tokens) to switch to once ``ctx.web_wanted``."""
+        ctx.web_sent = ctx.web_sent or (handoff is None and ctx.web_on)
+        # After a handoff: what to restore if the API rejects the web tools (tools already ran
+        # this turn, so it carries on from here instead of restarting the turn).
+        before: tuple[list[ToolUnionParam], Tier, int | None] | None = None
+        rejected = ""
         for i in range(MAX_TOOL_ITERATIONS + 1):
             last = i == MAX_TOOL_ITERATIONS
-            resp = await self._llm.complete(
-                LLMRequest(
-                    purpose="chat",
-                    model_role=ctx.tier,
-                    system=system,
-                    messages=messages,
-                    max_tokens=ctx.max_tokens,
-                    tools=tools,
-                    tool_choice={"type": "none"} if last else None,
-                    user_id=ctx.actor.id,
-                    chat_id=ctx.chat_id,
-                    timeout_s=INTERACTIVE_TIMEOUT_S if ctx.tier == "default" else DEEP_TIMEOUT_S,
+            try:
+                resp = await self._call(system, messages, ctx, tools, last)
+            except LLMBadRequest as e:
+                if before is None or ctx.web_used:
+                    raise
+                log.warning(
+                    "request with web tools rejected; continuing without them",
+                    extra={"detail": e.detail or None},
                 )
-            )
+                tools, ctx.tier, ctx.max_tokens = before
+                before, rejected = None, e.detail
+                ctx.web_on = ctx.web_sent = False
+                resp = await self._call(system, messages, ctx, tools, last)
+            if rejected and self._health is not None:
+                # The same request went through without them, so the web tools were the problem.
+                self._health.web_rejected_by_api(rejected)
+                rejected = ""
             await self._note_web(resp, ctx)
             if resp.message.stop_reason == "pause_turn" and not last:
                 # A long server-tool turn paused; sending it back unchanged resumes it.
@@ -326,7 +349,39 @@ class Orchestrator:
                 },
                 {"role": "user", "content": await self._run_tools(resp, ctx)},
             ]
+            if handoff is not None and ctx.web_wanted:
+                web_extra, tier, max_tokens = handoff
+                handoff = None
+                before = (tools, ctx.tier, ctx.max_tokens)
+                tools = [*tools, *web_extra]
+                ctx.web_sent = True
+                if TIER_RANK[tier] > TIER_RANK[ctx.tier]:
+                    ctx.tier, ctx.max_tokens = tier, max_tokens
+                log.info("web handoff", extra={"tier": ctx.tier})
         raise AssertionError("unreachable")
+
+    async def _call(
+        self,
+        system: Any,
+        messages: list[MessageParam],
+        ctx: TurnContext,
+        tools: list[ToolUnionParam],
+        last: bool,
+    ) -> LLMResponse:
+        return await self._llm.complete(
+            LLMRequest(
+                purpose="chat",
+                model_role=ctx.tier,
+                system=system,
+                messages=messages,
+                max_tokens=ctx.max_tokens,
+                tools=tools,
+                tool_choice={"type": "none"} if last else None,
+                user_id=ctx.actor.id,
+                chat_id=ctx.chat_id,
+                timeout_s=INTERACTIVE_TIMEOUT_S if ctx.tier == "default" else DEEP_TIMEOUT_S,
+            )
+        )
 
     async def _note_web(self, resp: LLMResponse, ctx: TurnContext) -> None:
         """Mark the turn as web-assisted and store each search/fetch for the conversation view.
@@ -345,7 +400,13 @@ class Orchestrator:
             if block.type != "tool_use":
                 continue
             raw = block.input if isinstance(block.input, dict) else {}
-            outcome = await self._tools.execute(block.name, raw, ctx)
+            if block.name == HANDOFF_TOOL:
+                outcome = self._handoff(ctx)
+            else:
+                outcome = await self._tools.execute(block.name, raw, ctx)
+                rec = ctx.recommend.result if ctx.recommend is not None else None
+                if block.name == "find_places" and ctx.web_on and rec and rec.suggest_web:
+                    ctx.web_wanted = ctx.web_wanted or rec.slots_left > 0
             log.info("tool call", extra={"tool": block.name, "error": outcome.is_error})
             result: ToolResultBlockParam = {
                 "type": "tool_result",
@@ -357,6 +418,15 @@ class Orchestrator:
             results.append(result)
             await self._store_tool_call(ctx.chat_id, block.name, raw, outcome.content)
         return results
+
+    def _handoff(self, ctx: TurnContext) -> ToolOutcome:
+        if not ctx.web_on:
+            return ToolOutcome(
+                json.dumps({"error": "web lookups are off right now; answer without them"}),
+                is_error=True,
+            )
+        ctx.web_wanted = True
+        return ToolOutcome(json.dumps({"ok": True, "note": "web_search and web_fetch are on now."}))
 
     async def _store_tool_call(
         self, chat_id: int, name: str, raw: dict[str, Any], result: str

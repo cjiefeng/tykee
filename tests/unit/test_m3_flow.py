@@ -241,13 +241,13 @@ async def test_tool_definitions_include_memory_tools(env: Env) -> None:
     stack = make_stack(env, llm)
     await _ask(stack, env, "hi")
     names = [t["name"] for t in llm.requests[0].tools]
-    assert names[-6:] == [
+    # The web tools join on the web tier (§7.5); the default tier gets look_up_web.
+    assert names[-5:] == [
         "search_memory",
         "read_note",
         "write_note",
         "propose_memory",
-        "web_search",
-        "web_fetch",
+        "look_up_web",
     ]
 
 

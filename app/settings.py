@@ -252,6 +252,9 @@ class RuntimeSettings(BaseModel):
     web_allowed_domains: list[str] = Field(default_factory=list)
     web_blocked_domains: list[str] = Field(default_factory=list)
     web_tool_versions: WebToolVersions | None = None  # None → web tools stay off
+    # §7.5: model tier for turns that use the web. Lower tiers get look_up_web instead of the web
+    # tools and hand the turn over when they need them; "default" offers them on every turn.
+    web_tier: Literal["default", "escalated", "deep"] = "escalated"
     pricing_web_search: float = Field(0.0, ge=0)  # USD per search (`pricing.web_search`)
     places_enabled: bool = True
     places_reaction: str = "👌"

@@ -54,6 +54,9 @@ All tooling runs inside Docker (no local Python/uv needed).
   drops to the default tier past the budget warn ratio and for unprompted replies.
   `web.py` (§7.5): web search/fetch server tools, gate (switch → daily search cap → budget
   warn ratio), result readers; web-assisted turns can only propose memories, never write notes.
+  Below `web.tier` a turn gets `look_up_web` instead; calling it (or `find_places` asking for the
+  web) moves the rest of the tool loop to that tier with the web tools (`Orchestrator._loop`).
+  Web tests run with `web.tier` = default (autouse fixture in `tests/unit/test_web.py`).
 - `app/brain/`: second brain (§6). `notes.py` (pure: paths, frontmatter, edit modes, chunking,
   wikilinks), `store.py` (`NoteStore`: the only vault writer; atomic write → synchronous
   reindex; `reconcile()` at startup), `index.py` (notes/chunks/FTS5/vec0/links rows),
