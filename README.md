@@ -41,6 +41,10 @@ It runs as one Python 3.12 asyncio process with SQLite, in a single Docker conta
 - **Bootstrap import:** upload a Telegram Desktop export in the dashboard and Tykee learns your
   past decisions, categories and preferences from it. Health, money, work and relationship talk
   is skipped.
+- **Google Maps links:** paste a Maps link (or share a Telegram venue) and Tykee works out which
+  shop it is, in code with no API or LLM, and remembers it as a place. "Eating here" with a link in
+  the answer topic records the decision and gets a quiet 👌 reaction instead of a reply, so "where
+  are we eating?" answers with the shop name and link.
 - **Scheduled nudges** (off by default) can post a pick at a set time, e.g. "Dinner? I'm thinking
   Thai" on weekdays at 17:30. No Claude call needed.
 - **If Claude is unavailable** or the budget cap is reached, it falls back to a plain random pick.
@@ -165,13 +169,21 @@ loop, and update `docs/design.md` in the same commit as any behaviour change.
 | M6 ✅ | Scheduled nudges, backups, healthcheck, runbook |
 | M7 ✅ | Web search and fetch, with cited answers |
 | M8 ✅ | Google Maps links → places: resolve pasted links to a named shop (no API, no LLM), record "eating here" as a decision, never store home addresses |
-| M9 | Place recommendations: "brunch around Tiong Bahru, pet friendly" picks from known places plus web discovery, with must-have filters and a source for each attribute (you confirmed vs. per website) |
+| M9 🚧 | Place recommendations: "brunch around Tiong Bahru, pet friendly" picks from known places plus web discovery, with must-have filters and a source for each attribute (you confirmed vs. per website) |
+| M10 | Read-only account reader: learns decisions and preferences from chats the bot isn't in (starting with the Jack ↔ partner DM) via Jack's account. Strictly read-only; which chats it may read is picked in the dashboard, each with its own consent; one-click Disconnect |
 
 Details and acceptance criteria are in design §16.
 
 ## Privacy
 
-Everything stays on the server except the prompts sent to the Anthropic API and web searches made
-through it. Embeddings are computed locally. The dashboard is LAN-only, with no port forwarding.
+Everything stays on the server except the prompts sent to the Anthropic API, web searches made
+through it, and the redirect lookups for pasted Maps short links (Google hosts only). Embeddings
+are computed locally. The dashboard is LAN-only, with no port forwarding.
 Tykee doesn't use the Google Maps or Places API: place info comes from pasted links, chat and web
 search, and home addresses are never stored.
+
+The planned M10 account reader will log in as Jack and read only the chats on an allowlist managed
+in the dashboard. Each chat needs a recorded consent, and adding one requires re-entering the admin
+password and triggers a Telegram alert to the admin. The reader can't send, react or mark messages
+as read. The session is encrypted with a key kept out of backups, and raw chat text is deleted after
+harvesting (7 days by default).
