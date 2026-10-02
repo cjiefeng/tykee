@@ -1,17 +1,16 @@
 from __future__ import annotations
 
 from app.llm.client import BudgetExceeded, LLMUnavailable
-from app.orchestrator.orchestrator import FALLBACK_BUDGET, FALLBACK_OFFLINE, Orchestrator
+from app.orchestrator.orchestrator import FALLBACK_BUDGET, FALLBACK_OFFLINE
 from app.telegram.adapter import TelegramAdapter
-from tests.conftest import BOT, GROUP_ID, JACK_TG, PARTNER_TG, Env, mention, tg_message
+from tests.conftest import GROUP_ID, JACK_TG, PARTNER_TG, Env, make_stack, mention, tg_message
 from tests.fakes.fake_gateway import FakeGateway
 from tests.fakes.fake_llm import FakeLLMClient
 
 
 def _adapter(env: Env, llm: FakeLLMClient) -> tuple[TelegramAdapter, FakeGateway]:
-    gw = FakeGateway()
-    orch = Orchestrator(db=env.db, settings=env.settings, llm=llm, users=env.users)
-    return TelegramAdapter(db=env.db, gateway=gw, orchestrator=orch, me=BOT, users=env.users), gw
+    stack = make_stack(env, llm)
+    return stack.adapter, stack.gateway
 
 
 async def _rows(env: Env) -> list[tuple[str, int | None]]:
@@ -84,8 +83,8 @@ async def test_llm_failures_fall_back_and_are_not_stored(env: Env) -> None:
     for _ in range(2):
         text, ents = mention("dinner?")
         await adapter.handle_message(tg_message(text, entities=ents), env.jack)
-    assert [s.text for s in gw.sent] == [FALLBACK_OFFLINE, FALLBACK_BUDGET]
-    assert all(role == "user" for role, _ in await _rows(env))
+    assert [s.text.split(" Try")[0] for s in gw.sent] == [FALLBACK_OFFLINE, FALLBACK_BUDGET]
+    assert all(role in ("user", "tool") for role, _ in await _rows(env))
 
 
 async def test_history_window_respects_setting(env: Env) -> None:

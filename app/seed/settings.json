@@ -11,5 +11,6 @@
   "history.max_turns": 12,
   "llm.max_tokens": 400,
   "budget.daily_usd": 1.0,
-  "budget.monthly_usd": 15.0
+  "budget.monthly_usd": 15.0,
+  "decisions.session_hours": 6
 }

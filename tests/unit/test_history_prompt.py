@@ -38,9 +38,10 @@ def test_dm_turns_have_no_speaker_tags(env: Env) -> None:
 def test_system_blocks_cache_static_prefix_only(env: Env) -> None:
     dyn = dynamic_context(
         now=datetime(2026, 10, 2, 11, 0, tzinfo=UTC), actor=env.jack, users=env.users,
-        is_group=True,
+        is_group=True, default_for_users="both",
     )  # fmt: skip
     assert "19:00 (Asia/Singapore)" in dyn and "for both" in dyn
+    assert dyn.endswith("Default for_users: both")
     blocks = build_system("PERSONA", dyn)
     assert [b.get("cache_control") is not None for b in blocks] == [False, True, False]
     assert blocks[0]["text"] == "PERSONA" and blocks[-1]["text"] == dyn
