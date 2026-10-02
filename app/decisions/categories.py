@@ -226,6 +226,7 @@ def merge(conn: sqlite3.Connection, src_id: int, dst_id: int) -> None:
         conn.execute("DELETE FROM option_prefs WHERE option_id = ?", (opt["id"],))
         conn.execute("DELETE FROM options WHERE id = ?", (opt["id"],))
     conn.execute("UPDATE decisions SET category_id = ? WHERE category_id = ?", (dst.id, src_id))
+    conn.execute("UPDATE places SET category_hint = ? WHERE category_hint = ?", (dst.id, src_id))
     conn.execute(
         "UPDATE category_aliases SET category_id = ? WHERE category_id = ?", (dst.id, src_id)
     )
