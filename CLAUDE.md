@@ -37,8 +37,9 @@ All tooling runs inside Docker (no local Python/uv needed).
   `app/seed/settings.json`**; a test fails if `claude-` appears in any `.py` under `app/`.
 - `app/db/`: `Database` (one writer thread + read-only pool), numbered migrations in
   `app/db/migrations/NNNN_name.sql`, small query modules in `app/db/repos/`.
-- `app/llm/client.py`: `LLMClient` protocol + `AnthropicLLMClient`, the only code that calls
-  the Claude API (budget check, timeouts, SDK retries, usage/cost rows).
+- `app/llm/client.py`: `LLMClient` / `BatchClient` protocols + `AnthropicLLMClient`, the only
+  code that calls the Claude API (budget check, timeouts, SDK retries, usage/cost rows; batches
+  recorded at 50%; import spend counts against the monthly cap only).
 - `app/telegram/`: `AccessGate` outer middleware (allowlist + allowed group, runs before
   anything else), `TelegramAdapter` (persist + reply when addressed, commands, ✅🎲❌
   callbacks), `ChatGateway` port, keyboards, HTML formatting/splitting.
@@ -59,6 +60,11 @@ All tooling runs inside Docker (no local Python/uv needed).
 - `app/harvest.py` + `app/scheduler.py`: memory harvester for non-answer topics (code-only tick
   every minute, Haiku extraction only when a topic has new chat); `app/extraction/schema.py` is
   shared with the M5 import; `app/inbox_appliers.py` applies approved category/option suggestions.
+- `app/importer/`: bootstrap import (§15, notes in §15.6). `telegram.py` (streaming ijson parser,
+  zip guard), `windowing.py` (windows + cost estimate), `prompts.py`, `consolidate.py` (pure:
+  episode dedupe, category-design validation, options/weights, notes), `jobs.py` (queries +
+  review edits), `service.py` (`ImportService`: job state machine ticked by the scheduler, one
+  Message Batch per round, Opus consolidation, apply). Exports live in `/data/imports`.
 - `app/dashboard/`: FastAPI + Jinja2 + vendored HTMX (§11), served by uvicorn inside the bot's
   event loop. `core.py` (LAN-only, argon2 login + lockout, sessions, CSRF, `render()`),
   `queries.py` (all dashboard SQL + validated `save_settings`), `views_*.py` per page,
@@ -72,7 +78,8 @@ All tooling runs inside Docker (no local Python/uv needed).
 - `scripts/embedding_eval.py`: the §6.9 int8 vs fp32 eval (needs the real models; run in the dev
   container with `uv run python -m scripts.embedding_eval all <cache dir>`).
 - `tests/fakes/`: `FakeLLMClient` (scripted text / `tool_call(...)` / exceptions), `FakeGateway`,
-  `FakeEmbedder` (hashed bag of words; unit tests never load the real model).
+  `FakeEmbedder` (hashed bag of words; unit tests never load the real model), `FakeBatches`
+  (scripted Message Batches), `telegram_export.py` (export builders).
   `tests/conftest.py`: migrated temp DB (`env`), `make_stack()` wiring the whole bot with fakes,
   `seed_category()`. Ambient tests call `stack.ambient.fire(chat_id)` directly instead of
   waiting for the debounce; background tasks are closed via `env.closers`.

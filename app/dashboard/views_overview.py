@@ -159,7 +159,3 @@ def register(router: APIRouter, deps: DashboardDeps) -> None:
         return back(
             request, "/system", f"Reindexed {stats['files']} notes ({stats['reindexed']} embedded)."
         )
-
-    @router.get("/import", response_class=HTMLResponse)
-    async def import_page(request: Request) -> Response:
-        return render(request, deps, "import.html")

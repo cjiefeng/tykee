@@ -1,20 +1,20 @@
 {% extends "base.html" %}
 {% block title %}Settings{% endblock %}
 {% block content %}
-<h1>All settings</h1>
-<p class="muted">Every runtime setting as JSON. Changes are validated against the full settings set before they're saved and apply to the next message.</p>
-<table><tr><th>Key</th><th>Value (JSON)</th><th></th></tr>
+<div class="page-head"><div><h1>All settings</h1>
+  <p class="lede">Every runtime setting as JSON. Changes are validated against the full settings set before they're saved and apply to the next message.</p></div></div>
+<div class="table-wrap"><table><tr><th>Key</th><th>Value (JSON)</th><th><span class="sr-only">Save</span></th></tr>
 {% for key, value, updated in rows %}
 <tr><td><code>{{ key }}</code><div class="muted small">{{ updated }}</div></td>
 <td><form method="post" action="/settings" id="f-{{ loop.index }}">{{ csrf_input }}<input type="hidden" name="key" value="{{ key }}">
-<textarea name="value" style="min-height:{{ '6rem' if value | length > 80 else '2.4rem' }}">{{ value }}</textarea></form></td>
-<td><button form="f-{{ loop.index }}">Save</button></td></tr>
+<textarea name="value" aria-label="{{ key }}" style="min-height:{{ '6rem' if value | length > 80 else '2.6rem' }}">{{ value }}</textarea></form></td>
+<td><button form="f-{{ loop.index }}" class="sm">Save</button></td></tr>
 {% endfor %}
-</table>
+</table></div>
 <h2>Add a setting</h2>
-<form method="post" action="/settings">{{ csrf_input }}
-  <div class="row"><div><label>Key</label><input type="text" name="key" placeholder="pricing.claude-…"></div>
-  <div><label>Value (JSON)</label><input type="text" name="value" placeholder='{"input": 1.0, …}'></div></div>
+<form method="post" action="/settings" class="form-panel">{{ csrf_input }}
+  <div class="row"><div><label for="new-key">Key</label><input id="new-key" type="text" name="key" placeholder="pricing.claude-…"></div>
+  <div><label for="new-value">Value (JSON)</label><input id="new-value" type="text" name="value" placeholder='{"input": 1.0, …}'></div></div>
   <div class="actions"><button class="primary">Add</button></div>
 </form>
 {% endblock %}

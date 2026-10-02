@@ -2,6 +2,8 @@
 
 Every call: resolve model from settings → budget check → Messages API call (timeout, SDK
 exponential-backoff retries on 408/409/429/5xx/overloaded) → ``usage`` row with computed cost.
+The bootstrap import (§15) also submits Message Batches here; their usage rows are written when
+results are collected, at the batch discount.
 """
 
 from __future__ import annotations
@@ -10,7 +12,7 @@ import logging
 import sqlite3
 from collections.abc import Sequence
 from dataclasses import dataclass, field
-from typing import Any, Literal, Protocol
+from typing import Any, Literal, Protocol, cast
 from zoneinfo import ZoneInfo
 
 import anthropic
@@ -21,6 +23,8 @@ from anthropic.types import (
     ToolChoiceParam,
     ToolParam,
 )
+from anthropic.types.message_create_params import MessageCreateParamsNonStreaming
+from anthropic.types.messages.batch_create_params import Request
 
 from app.db.database import Database
 from app.db.repos import usage as usage_repo
@@ -34,8 +38,9 @@ log = logging.getLogger(__name__)
 Purpose = Literal["chat", "judge", "summary", "import_extract", "import_consolidate", "harvest"]
 
 INTERACTIVE_TIMEOUT_S = 30.0
-CONSOLIDATION_TIMEOUT_S = 120.0
+CONSOLIDATION_TIMEOUT_S = 600.0
 INTERACTIVE_MAX_RETRIES = 2
+BATCH_DISCOUNT = 0.5  # Message Batches bill every token at half price
 
 
 class LLMError(Exception):
@@ -69,6 +74,7 @@ class LLMRequest:
     import_job_id: int | None = None
     timeout_s: float = INTERACTIVE_TIMEOUT_S
     max_retries: int = INTERACTIVE_MAX_RETRIES
+    stream: bool = False  # long outputs (import consolidation): stream to avoid idle timeouts
 
 
 @dataclass(frozen=True)
@@ -89,6 +95,28 @@ class LLMClient(Protocol):
     async def complete(self, req: LLMRequest) -> LLMResponse: ...
 
 
+BatchStatus = Literal["in_progress", "canceling", "ended"]
+
+
+@dataclass(frozen=True)
+class BatchItemResult:
+    custom_id: str
+    response: LLMResponse | None  # None → ``error`` says why (errored / canceled / expired)
+    error: str = ""
+
+
+class BatchClient(Protocol):
+    """Message Batches (§15.3 EXTRACT). Every request in a batch uses the same purpose/model."""
+
+    async def submit_batch(self, items: Sequence[tuple[str, LLMRequest]]) -> str: ...
+
+    async def batch_status(self, batch_id: str) -> BatchStatus: ...
+
+    async def batch_results(self, batch_id: str, template: LLMRequest) -> list[BatchItemResult]: ...
+
+    async def cancel_batch(self, batch_id: str) -> None: ...
+
+
 @dataclass(frozen=True)
 class BudgetStatus:
     daily_spent: float
@@ -98,21 +126,26 @@ class BudgetStatus:
 
 
 async def budget_status(db: Database, settings: RuntimeSettings, tz: ZoneInfo) -> BudgetStatus:
+    """The import (§15) counts against the monthly cap only: a one-off $3-10 job must not put
+    the chat into fallback mode for the rest of the day (§13)."""
     now = utcnow()
     day_since = to_sql(local_day_start(now, tz))
     month_since = to_sql(local_month_start(now, tz))
 
     def _q(conn: sqlite3.Connection) -> tuple[float, float]:
-        return usage_repo.cost_since(conn, day_since), usage_repo.cost_since(conn, month_since)
+        return (
+            usage_repo.cost_since(conn, day_since, include_import=False),
+            usage_repo.cost_since(conn, month_since),
+        )
 
     daily, monthly = await db.read(_q)
     return BudgetStatus(daily, monthly, settings.budget_daily_usd, settings.budget_monthly_usd)
 
 
-def check_budget(status: BudgetStatus) -> None:
+def check_budget(status: BudgetStatus, *, monthly_only: bool = False) -> None:
     if status.monthly_spent >= status.monthly_cap:
         raise BudgetExceeded("monthly", status.monthly_spent, status.monthly_cap)
-    if status.daily_spent >= status.daily_cap:
+    if not monthly_only and status.daily_spent >= status.daily_cap:
         raise BudgetExceeded("daily", status.daily_spent, status.daily_cap)
 
 
@@ -147,48 +180,137 @@ class AnthropicLLMClient:
             self._health.llm_result(ok)
 
     async def complete(self, req: LLMRequest) -> LLMResponse:
+        client = self._require()
+        settings = await self._settings.load()
+        await self._check_budget(settings, req)
+        model = settings.model_for(req.model_role)
+        sdk = client.with_options(timeout=req.timeout_s, max_retries=req.max_retries)
+        params = self._params(req, model, settings)
+        try:
+            if req.stream:
+                async with sdk.messages.stream(**params) as stream:
+                    message = await stream.get_final_message()
+            else:
+                message = await sdk.messages.create(**params)
+        except anthropic.APIError as e:
+            raise self._failed(e, req, model) from e
+        self._record(ok=True)
+        cost = await self._record_usage(req, model, message, settings)
+        return LLMResponse(message=message, model=model, cost_usd=cost)
+
+    # --- Message Batches (§15.3) -----------------------------------------------------------------
+
+    async def submit_batch(self, items: Sequence[tuple[str, LLMRequest]]) -> str:
+        client = self._require()
+        if not items:
+            raise ValueError("empty batch")
+        settings = await self._settings.load()
+        await self._check_budget(settings, items[0][1])
+        requests: list[Request] = []
+        for custom_id, req in items:
+            model = settings.model_for(req.model_role)
+            params = cast(MessageCreateParamsNonStreaming, self._params(req, model, settings))
+            requests.append(Request(custom_id=custom_id, params=params))
+        sdk = client.with_options(timeout=120.0, max_retries=INTERACTIVE_MAX_RETRIES)
+        try:
+            batch = await sdk.messages.batches.create(requests=requests)
+        except anthropic.APIError as e:
+            raise self._failed(e, items[0][1], "batch") from e
+        log.info("batch submitted", extra={"batch_id": batch.id, "requests": len(requests)})
+        return batch.id
+
+    async def batch_status(self, batch_id: str) -> BatchStatus:
+        client = self._require()
+        try:
+            batch = await client.with_options(timeout=60.0).messages.batches.retrieve(batch_id)
+        except anthropic.APIError as e:
+            raise LLMUnavailable(type(e).__name__) from e
+        return batch.processing_status
+
+    async def batch_results(self, batch_id: str, template: LLMRequest) -> list[BatchItemResult]:
+        """Collect an ended batch. Writes one ``usage`` row per succeeded request, at the batch
+        discount, tagged with ``template``'s purpose and import job."""
+        client = self._require()
+        settings = await self._settings.load()
+        out: list[BatchItemResult] = []
+        try:
+            decoder = await client.with_options(timeout=300.0).messages.batches.results(batch_id)
+            async for item in decoder:
+                result = item.result
+                if result.type != "succeeded":
+                    detail = result.error.error.type if result.type == "errored" else ""
+                    out.append(BatchItemResult(item.custom_id, None, f"{result.type} {detail}"))
+                    continue
+                msg = result.message
+                cost = await self._record_usage(
+                    template, msg.model, msg, settings, discount=BATCH_DISCOUNT
+                )
+                out.append(BatchItemResult(item.custom_id, LLMResponse(msg, msg.model, cost)))
+        except anthropic.APIError as e:
+            raise LLMUnavailable(type(e).__name__) from e
+        return out
+
+    async def cancel_batch(self, batch_id: str) -> None:
+        client = self._require()
+        try:
+            await client.with_options(timeout=60.0).messages.batches.cancel(batch_id)
+        except anthropic.APIError as e:
+            log.warning("batch cancel failed", extra={"batch_id": batch_id, "error": str(e)})
+
+    # --- helpers -----------------------------------------------------------------------------
+
+    def _require(self) -> anthropic.AsyncAnthropic:
         if self._client is None or self.auth_failed:
             raise LLMUnavailable("ANTHROPIC_API_KEY missing or rejected")
-        settings = await self._settings.load()
-        check_budget(await budget_status(self._db, settings, self._tz))
+        return self._client
 
-        model = settings.model_for(req.model_role)
-        client = self._client.with_options(timeout=req.timeout_s, max_retries=req.max_retries)
-        try:
-            message = await client.messages.create(
-                model=model,
-                max_tokens=req.max_tokens or settings.llm_max_tokens,
-                system=list(req.system),
-                messages=list(req.messages),
-                tools=list(req.tools) if req.tools else anthropic.omit,
-                tool_choice=req.tool_choice if req.tool_choice is not None else anthropic.omit,
-                output_config=(
-                    {"format": {"type": "json_schema", "schema": req.json_schema}}
-                    if req.json_schema is not None
-                    else anthropic.omit
-                ),
-            )
-        except anthropic.AuthenticationError as e:
-            self._record(ok=False)
+    async def _check_budget(self, settings: RuntimeSettings, req: LLMRequest) -> None:
+        status = await budget_status(self._db, settings, self._tz)
+        check_budget(status, monthly_only=req.import_job_id is not None)
+
+    @staticmethod
+    def _params(req: LLMRequest, model: str, settings: RuntimeSettings) -> dict[str, Any]:
+        params: dict[str, Any] = {
+            "model": model,
+            "max_tokens": req.max_tokens or settings.llm_max_tokens,
+            "system": list(req.system),
+            "messages": list(req.messages),
+        }
+        if req.tools:
+            params["tools"] = list(req.tools)
+        if req.tool_choice is not None:
+            params["tool_choice"] = req.tool_choice
+        if req.json_schema is not None:
+            params["output_config"] = {"format": {"type": "json_schema", "schema": req.json_schema}}
+        return params
+
+    def _failed(self, e: anthropic.APIError, req: LLMRequest, model: str) -> LLMUnavailable:
+        self._record(ok=False)
+        if isinstance(e, anthropic.AuthenticationError):
             self.auth_failed = True
             log.error("anthropic auth failed; switching to fallback mode")
-            raise LLMUnavailable("API key rejected") from e
-        except anthropic.APIError as e:
-            self._record(ok=False)
-            log.warning(
-                "anthropic call failed",
-                extra={"purpose": req.purpose, "model": model, "error": type(e).__name__},
-            )
-            raise LLMUnavailable(type(e).__name__) from e
+            return LLMUnavailable("API key rejected")
+        log.warning(
+            "anthropic call failed",
+            extra={"purpose": req.purpose, "model": model, "error": type(e).__name__},
+        )
+        return LLMUnavailable(type(e).__name__)
 
-        self._record(ok=True)
+    async def _record_usage(
+        self,
+        req: LLMRequest,
+        model: str,
+        message: Message,
+        settings: RuntimeSettings,
+        discount: float = 1.0,
+    ) -> float:
         u = message.usage
         cache_read = u.cache_read_input_tokens or 0
         cache_write = u.cache_creation_input_tokens or 0
         price = settings.pricing.get(model)
         if price is None:
             log.warning("no pricing for model; cost recorded as 0", extra={"model": model})
-        cost = cost_usd(
+        cost = discount * cost_usd(
             price,
             input_tokens=u.input_tokens,
             output_tokens=u.output_tokens,
@@ -222,4 +344,4 @@ class AnthropicLLMClient:
                 "stop": message.stop_reason,
             },
         )
-        return LLMResponse(message=message, model=model, cost_usd=cost)
+        return cost

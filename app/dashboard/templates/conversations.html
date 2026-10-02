@@ -1,8 +1,9 @@
 {% extends "base.html" %}
 {% block title %}Conversations{% endblock %}
 {% block content %}
-<h1>Conversations</h1>
-<table><tr><th>Chat</th><th>Messages</th><th>Last activity</th></tr>
+<div class="page-head"><div><h1>Conversations</h1>
+  <p class="lede">Every chat Tykee is in, with full transcripts including tool calls.</p></div></div>
+<div class="table-wrap"><table><tr><th>Chat</th><th>Messages</th><th>Last activity</th></tr>
 {% for chat_id, name, n, last in chats %}<tr><td><a href="/conversations/{{ chat_id }}">{{ name }}</a> <span class="muted small">{{ chat_id }}</span></td><td>{{ n }}</td><td>{{ local(last) }}</td></tr>
-{% else %}<tr><td colspan="3" class="muted">No messages yet.</td></tr>{% endfor %}</table>
+{% else %}<tr><td colspan="3">No messages yet.</td></tr>{% endfor %}</table></div>
 {% endblock %}

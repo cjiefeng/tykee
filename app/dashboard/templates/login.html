@@ -2,14 +2,15 @@
 {% block title %}Log in{% endblock %}
 {% block content %}
 <div class="login card">
-  <h1>🎲 Tykee</h1>
-  {% if error %}<div class="flash error">{{ error }}</div>{% endif %}
-  {% if locked %}<div class="flash error">Too many attempts. Try again in a few minutes.</div>{% endif %}
+  <div class="brand"><span class="mark" aria-hidden="true">T</span>Tykee</div>
+  <h1>Log in</h1>
+  {% if error %}<div class="flash error" role="alert">{{ error }}</div>{% endif %}
+  {% if locked %}<div class="flash error" role="alert">Too many attempts. Try again in a few minutes.</div>{% endif %}
   <form method="post" action="/login">
     {{ csrf_input }}
     <label for="password">Admin password</label>
-    <input id="password" type="password" name="password" autofocus autocomplete="current-password">
-    <div class="actions"><button class="primary">Log in</button></div>
+    <input id="password" type="password" name="password" autofocus autocomplete="current-password" required>
+    <div class="actions"><button class="primary" style="width:100%">Log in</button></div>
   </form>
 </div>
 {% endblock %}

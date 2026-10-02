@@ -35,6 +35,7 @@ from app.db.repos.users import UserRecord
 from app.decisions.service import DecisionService
 from app.harvest import Harvester
 from app.health import HealthState
+from app.importer.service import ImportService
 from app.settings import SettingsStore
 from app.telegram.gateway import ChatGateway
 from app.telegram.topics import TopicService
@@ -81,6 +82,7 @@ class DashboardDeps:
     log_lines: Callable[[], list[str]]
     harvester: Harvester | None = None
     ambient: AmbientService | None = None
+    importer: ImportService | None = None
     embed_model: str = ""
     _failures: dict[str, tuple[int, float]] = field(default_factory=dict)
 

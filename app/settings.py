@@ -78,6 +78,8 @@ class RuntimeSettings(BaseModel):
     harvest_max_age_hours: float = 6.0
     harvest_context_messages: int = 10
     budget_warn_ratio: float = 0.8
+    import_max_upload_mb: int = 200
+    import_poll_min: float = 5.0
 
     def model_for(self, role: ModelRole) -> str:
         return self.models.for_role(role)

@@ -10,6 +10,7 @@ dependencies = [
   "argon2-cffi>=23.1",
   "fastembed>=0.8,<0.9",
   "fastapi>=0.115",
+  "ijson>=3.3",
   "itsdangerous>=2.2",
   "jinja2>=3.1",
   "numpy>=2",
@@ -17,6 +18,7 @@ dependencies = [
   "python-multipart>=0.0.9",
   "pydantic>=2.7",
   "pydantic-settings>=2.4",
+  "rapidfuzz>=3.9",
   "sqlite-vec>=0.1.6",
   "tzdata",
   "uvicorn>=0.30",
@@ -55,7 +57,7 @@ files = ["app"]
 plugins = ["pydantic.mypy"]
 
 [[tool.mypy.overrides]]
-module = ["sqlite_vec", "frontmatter", "fastembed", "fastembed.*", "apscheduler.*"]
+module = ["sqlite_vec", "frontmatter", "fastembed", "fastembed.*", "apscheduler.*", "ijson", "ijson.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]
