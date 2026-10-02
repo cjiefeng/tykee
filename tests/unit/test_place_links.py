@@ -28,6 +28,18 @@ PLACE_PAGE = (
 HOME_Q = "https://www.google.com/maps?q=Blk+123+Tampines+Street+11,+Singapore+521123&ftid=0x1:0x2"
 PIN = "https://www.google.com/maps?q=1.3521,103.8198"
 
+# A share.google link (the share sheet in the Google app / Maps): two hops, ending on a search
+# results page with the place name in q and its knowledge-graph id in kgmid.
+SHARE = "https://share.google/aBcD1234efGH5678"
+SHARE_HOP = "https://www.google.com/share.google?q=aBcD1234efGH5678"
+SHARE_SEARCH = (
+    "https://www.google.com/search?kgmid=/g/11c1q9t9qv&hl=en-SG&q=Keisuke+Tonkotsu+King"
+    "&shndl=30&source=sh/x/loc/uni/m1/1&kgs=0123456789abcdef&shem=lcuae,uaasie"
+)
+SHARE_NOT_PLACE = (
+    "https://www.google.com/search?kgmid=/m/0abc12&q=Some+Film&source=sh/x/kp/osrp/m1/1"
+)
+
 
 @pytest.mark.parametrize(
     ("url", "ok"),
@@ -40,6 +52,9 @@ PIN = "https://www.google.com/maps?q=1.3521,103.8198"
         ("https://maps.google.com/?cid=123", True),
         ("https://www.google.com.sg/maps/place/Foo", True),
         ("https://www.google.com/search?q=ramen", False),
+        (SHARE, True),
+        ("https://share.google/", False),
+        (SHARE_HOP, False),  # only fetched as a redirect hop, never picked up from text
         ("https://evil.example/maps/place/Foo", False),
         ("https://maps.google.com.evil.example/?q=Foo", False),
         ("https://user@maps.google.com/?q=Foo", False),
@@ -68,6 +83,20 @@ def test_parse_shared_short_link_target() -> None:
     assert p.address == "1 Tras Link, #01-11 Orchid Hotel, Singapore 078867"
     assert p.google_id == f"cid:{CID}"
     assert p.lat is None
+
+
+def test_share_google_hops_and_search_parser() -> None:
+    assert links.is_short_link(SHARE) and links.is_short_link(SHARE_HOP)
+    assert links.host_allowed(SHARE) and links.host_allowed(SHARE_HOP)
+    assert not links.is_short_link(SHARE_SEARCH)
+    p = links.parse_share_search(SHARE_SEARCH)
+    assert p is not None
+    assert p.name == "Keisuke Tonkotsu King" and p.address is None
+    assert p.google_id == "kgmid:/g/11c1q9t9qv" and p.lat is None
+    assert links.parse_share_search(SHARE_NOT_PLACE) is None  # not marked as a location
+    assert links.parse_share_search(SHARE_SEARCH.replace("kgmid=", "x=")) is None
+    assert links.parse_share_search("https://www.google.com/search?q=ramen") is None
+    assert links.parse_share_search(SHARED_Q) is None  # a Maps URL isn't a share search
 
 
 def test_parse_place_page_prefers_precise_coordinates() -> None:

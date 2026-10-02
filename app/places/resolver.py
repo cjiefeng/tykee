@@ -1,9 +1,10 @@
 """PlaceResolver (§10.5): pasted Maps link → final URL → parsed place, cached in ``place_links``.
 
-Only short links (maps.app.goo.gl, goo.gl/maps) are fetched; full google.<tld>/maps links are
-parsed as-is. Every hop must stay on an allowlisted host, at most 5 hops in 5 s, and response
-bodies are never read (the stream is closed after the headers), so a pasted link can't make the
-bot reach anything else (§12, SSRF). No LLM, no Maps API.
+Only short links (maps.app.goo.gl, goo.gl/maps, share.google) are fetched; full google.<tld>/maps
+links and the google.<tld>/search page a share.google link ends on are parsed as-is. Every hop
+must stay on an allowlisted host, at most 5 hops in 5 s, and response bodies are never read (the
+stream is closed after the headers), so a pasted link can't make the bot reach
+anything else (§12, SSRF). No LLM, no Maps API.
 """
 
 from __future__ import annotations
@@ -26,7 +27,8 @@ from app.timeutil import to_sql, utcnow
 
 log = logging.getLogger(__name__)
 
-Status = Literal["resolved", "unnamed", "failed", "blocked_host"]
+# not_place: a share.google link that resolved to something other than a location (never retried).
+Status = Literal["resolved", "unnamed", "not_place", "failed", "blocked_host"]
 
 MAX_HOPS = 5
 TIMEOUT_S = 5.0
@@ -102,12 +104,11 @@ class PlaceResolver:
             return Resolution(url, "failed", error=type(e).__name__)
         if isinstance(final, Resolution):
             return final
-        parsed = links.parse_maps_url(final)
-        if parsed is None:
-            return Resolution(url, "failed", error="unparseable")
-        if not links.is_named_business(parsed.name):
-            return Resolution(url, "unnamed")  # §10.5 privacy: the final URL isn't kept either
-        return Resolution(url, "resolved", parsed=parsed, final_url=final)
+        status, parsed = parse_final(final)
+        if status == "resolved":
+            return Resolution(url, "resolved", parsed=parsed, final_url=final)
+        # §10.5 privacy: the final URL of an unnamed link isn't kept either.
+        return Resolution(url, status, error="unparseable" if status == "failed" else None)
 
     async def _follow(self, url: str) -> str | Resolution:
         """The first URL that can be parsed without fetching, or why there isn't one."""
@@ -132,6 +133,21 @@ class PlaceResolver:
             current = urljoin(current, location)
 
 
+def parse_final(final: str) -> tuple[Status, ParsedPlace | None]:
+    """The place a final (non-short) URL names, through the named-business rule."""
+    if links.is_share_search(final):
+        parsed = links.parse_share_search(final)
+        if parsed is None:
+            return "not_place", None
+    else:
+        parsed = links.parse_maps_url(final)
+        if parsed is None:
+            return "failed", None
+    if not links.is_named_business(parsed.name):
+        return "unnamed", None
+    return "resolved", parsed
+
+
 def _store(c: sqlite3.Connection, res: Resolution, now: str) -> None:
     c.execute(
         "INSERT INTO place_links(url, final_url, status, error, attempts, resolved_at) "
@@ -146,7 +162,7 @@ def _from_row(r: sqlite3.Row) -> Resolution:
     status: Status = r["status"]
     parsed = None
     if status == "resolved" and r["final_url"]:
-        parsed = links.parse_maps_url(r["final_url"])
-        if parsed is None or not links.is_named_business(parsed.name):
+        again, parsed = parse_final(r["final_url"])
+        if again != "resolved":
             status, parsed = "unnamed", None  # stricter rules since it was cached
     return Resolution(r["url"], status, parsed, r["final_url"], r["error"], cached=True)

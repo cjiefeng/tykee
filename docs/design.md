@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **Status** | Draft v1.33 (reply escalation built: `/think` and phrases → Sonnet-tier, `/thinkharder` and "think even harder" → Opus-tier, §7.1). Earlier: v1.32 (M10 as built: read-only account reader with resolve/log-out on the wrapper, first poll sets a starting point, immediate harvest after a poll, Backfill as a generated export into the import wizard, §10.7) |
+| **Status** | Draft v1.34 (reply escalation built: `/think` and phrases → Sonnet-tier, `/thinkharder` and "think even harder" → Opus-tier, §7.1). Earlier: v1.33 (M10 as built: read-only account reader with resolve/log-out on the wrapper, first poll sets a starting point, immediate harvest after a poll, Backfill as a generated export into the import wizard, §10.7); v1.32 (share.google links resolve to places; `not_place` link status, §10.5) |
 | **Name** | Tykee: phonetic spelling of Tyche, the Greek goddess of chance. Telegram handle e.g. `@TykeeBot` (must end in "bot") |
 | **Author** | Jack |
 | **Date** | 2026-10-01 |
@@ -543,7 +543,7 @@ Client rules:
 
 Model IDs live in `settings` (`models.default`, `models.escalated`, `models.deep`), never hardcoded; an empty `models.deep` falls back to `models.escalated`.
 
-**As built (v1.33):** `app/orchestrator/escalation.py` picks the tier in code (whole-phrase, case-insensitive match; no extra LLM call). Every call of that turn's tool loop uses the tier's model, `escalation.max_tokens` (1200) instead of `llm.max_tokens`, a 90 s timeout, and a line in the dynamic context asking for a fuller, weighed answer (randomness still comes only from `random_pick`). The commands always work; `escalation.enabled` switches the phrase and length triggers. Unprompted (ambient) replies always use the default tier, and so does everything once spend passes `budget.warn_ratio`, so asking for Opus can't run the budget out. No extended thinking yet: with tool use it would mean replaying thinking blocks inside the tool loop. Settings live on Behaviour.
+**As built (v1.34):** `app/orchestrator/escalation.py` picks the tier in code (whole-phrase, case-insensitive match; no extra LLM call). Every call of that turn's tool loop uses the tier's model, `escalation.max_tokens` (1200) instead of `llm.max_tokens`, a 90 s timeout, and a line in the dynamic context asking for a fuller, weighed answer (randomness still comes only from `random_pick`). The commands always work; `escalation.enabled` switches the phrase and length triggers. Unprompted (ambient) replies always use the default tier, and so does everything once spend passes `budget.warn_ratio`, so asking for Opus can't run the budget out. No extended thinking yet: with tool use it would mean replaying thinking blocks inside the tool loop. Settings live on Behaviour.
 
 ### 7.2 Prompt assembly (in cache-friendly order)
 
@@ -989,7 +989,7 @@ Run on every persisted group/DM message (all topics, before the topic gate's "st
 
 | Source | Example |
 |---|---|
-| Short share links | `https://maps.app.goo.gl/AbC123`, `https://goo.gl/maps/…` |
+| Short share links | `https://maps.app.goo.gl/AbC123`, `https://goo.gl/maps/…`, `https://share.google/AbC123` (Google app / Maps share sheet) |
 | Full links | `https://www.google.com/maps/place/…`, `https://maps.google.com/?q=…`, `https://www.google.com/maps/search/…` |
 | Telegram **venue** messages | Telegram's own "share location → place" message: already carries `title` and `address` (and sometimes a Google place id); no resolving needed |
 | Plain **location** pins | Coordinates only, treated as unnamed (see privacy rule below) |
@@ -998,19 +998,20 @@ URLs are taken from message entities (`url`, `text_link`), not just regex on the
 
 #### Resolving (`PlaceResolver`)
 
-1. **Follow redirects** with `httpx`, hop by hop (`follow_redirects=False`, max 5 requests, 5 s for the whole chain, normal browser User-Agent, no proxy from the environment). Only **short links** (`maps.app.goo.gl/…`, `goo.gl/maps/…`) are fetched; full `google.<tld>/maps` links are parsed without any request. Every hop must stay on an **allowlisted host** (`maps.app.goo.gl`, `goo.gl`, `google.com`, `www.google.com`, `maps.google.com`, regional `google.<tld>` / `google.com.<cc>` variants, http(s), default ports, no userinfo); anything else aborts as `blocked_host`. Google's cookie-consent interstitial (`consent.google.<tld>?continue=…`) is unwrapped from its `continue` parameter without fetching it. The response body is never read (the stream is closed after the headers). This makes it safe against SSRF.
+1. **Follow redirects** with `httpx`, hop by hop (`follow_redirects=False`, max 5 requests, 5 s for the whole chain, normal browser User-Agent, no proxy from the environment). Only **short links** (`maps.app.goo.gl/…`, `goo.gl/maps/…`, `share.google/…`, and the `google.<tld>/share.google?q=<id>` hop a share.google link goes through) are fetched; full `google.<tld>/maps` links and the `google.<tld>/search` page a share.google link ends on are parsed without any request. Every hop must stay on an **allowlisted host** (`maps.app.goo.gl`, `goo.gl`, `share.google`, `google.com`, `www.google.com`, `maps.google.com`, regional `google.<tld>` / `google.com.<cc>` variants, http(s), default ports, no userinfo); anything else aborts as `blocked_host`. Google's cookie-consent interstitial (`consent.google.<tld>?continue=…`) is unwrapped from its `continue` parameter without fetching it. The response body is never read (the stream is closed after the headers). This makes it safe against SSRF.
 2. **Parse the final URL** (tolerant parser; formats vary, so tests use real shared links as fixtures):
    - `/maps/place/<Name>/@<lat>,<lng>,<zoom>z/data=…!3d<lat>!4d<lng>…` → name = URL-decoded `<Name>` (`+` → space), coordinates from `!3d/!4d` (precise) or `@lat,lng`.
    - `?q=<name or address>&ftid=0x…:0x…` or `?cid=<n>` → name from `q`, stable id from `ftid`/`cid`. `q` is often "Name, street, unit, postal code": the part before the first ", " is the name, the rest the address. The second half of an `ftid` is the place's CID, so both are stored as `google_id = 'cid:<n>'` and dedupe with each other (and with `!1s0x…:0x…` inside `data=`).
    - `/maps/search/<query>/@lat,lng…` → name = query (lower confidence).
    - Only coordinates → unnamed place.
-3. **Cache** every resolution in `place_links` (by original URL), so the same link is never fetched twice. Exception: a *full* link that turns out not to be a business isn't cached, because the URL itself is the address. `final_url` is kept only for `resolved` rows.
+   - share.google → `google.<tld>/search?kgmid=/g/…&q=<name>&source=sh/x/loc/…` → name from `q` (split like the Maps `q`), `google_id = 'kgmid:<kgmid>'`, no coordinates. Accepted only when `kgmid` and `q` are present and `source` contains `/loc/` (Google marks the share as a location); any other share (an article, a person, a film) is cached as **`not_place`**: nothing is stored or annotated, and it is never retried. A share.google link redirecting off Google (e.g. to a news site) is `blocked_host`. A share place has no coordinates, so it dedupes with a Maps link to the same shop by name (see below).
+3. **Cache** every resolution in `place_links` (by original URL; status `resolved`, `unnamed`, `not_place`, `failed` or `blocked_host`), so the same link is never fetched twice. Exception: a *full* link that turns out not to be a business isn't cached, because the URL itself is the address. `final_url` is kept only for `resolved` rows.
 4. **Fallbacks when no name is found:** if M7 is enabled, the orchestrator may use web search on the coordinates when someone actually asks about it; otherwise Tykee asks "which place is this?" only if it's in the answer topic and relevant. **Decided:** the Google Places API is **not** used anywhere in Tykee (cost, API key); all place data comes from links, chat and web search.
 
 #### What happens with a resolved place
 
 1. **Annotate the message** before anything reads it: the stored text gets an inline marker, e.g. `eating here https://maps.app.goo.gl/AbC123 ⟦place: Keisuke Tonkotsu King · Tanjong Pagar · 1.2799,103.8443 · place_id=42⟧`. The orchestrator, speak-or-stay-silent judge, harvester and import all see the shop name without extra work.
-2. **Upsert the place** in `places` (dedupe by `google_id` (ftid/cid) if present, else same normalised name within 75 m) and in the vault as `shared/places/<slug>.md` (`type: place`): name, Maps link, coordinates, first/last mentioned, times visited, plus anything learned later ("partner loves the black garlic broth").
+2. **Upsert the place** in `places` (dedupe by `google_id` (ftid/cid, kgmid, venue place id) if present, else same normalised name within 75 m, or any distance when either side has no coordinates; two different ids of the same scheme are never merged) and in the vault as `shared/places/<slug>.md` (`type: place`): name, Maps link, coordinates, first/last mentioned, times visited, plus anything learned later ("partner loves the black garlic broth").
 3. **Record the decision** when the message implies you're going there ("eating here", "let's go this one"):
    - **In the answer topic, Tykee not mentioned (decided v1.27: code only, no LLM call):** the message (stripped of links and markers) contains one of `places.intent_phrases`, or one was said in that topic within `places.intent_window_s` (120 s) before the link, or is said within that window after it. The category is the one the messages name (alias/slug match, as in the §8.5 fallback: "dinner here", "lunch here tmr?"), else the household-time **meal slot** in `places.meal_slots` (default 05:00–10:30 breakfast, 10:30–15:00 lunch, 17:00–23:00 dinner; wraps midnight). If that category doesn't exist, nothing is recorded (the place is still kept). Otherwise the decision is stored `status='accepted'`, `source='user'`, `for_users='both'`, `asked_by` = whoever said it, and mirrored to the decision log. Tykee confirms with a **reaction** on the link message instead of a reply, keeping §10.2's "silent by default". The reaction is `places.reaction`, default 👌: 📍 isn't in Telegram's list of emoji bots may react with (the setting only accepts that list). The burst still goes through the ambient judge as usual; "Decisions today" tells it the choice is made.
    - **When Tykee is addressed (mention, reply, DM):** Claude calls `record_decision(category, choice, for_users, place_id)` after `resolve_category`. With a `place_id` the choice is the place's name. Tykee reacts on the message that shared the place (else the message it answered) and replies with a few words at most; an empty reply sends nothing.
@@ -1038,7 +1039,7 @@ CREATE TABLE places (
   id             INTEGER PRIMARY KEY,
   name           TEXT NOT NULL,
   name_norm      TEXT NOT NULL,               -- normalised name, for dedupe
-  google_id      TEXT UNIQUE,                 -- 'cid:<n>' (ftid/cid) or 'gpid:<id>' (venue)
+  google_id      TEXT UNIQUE,                 -- 'cid:<n>' (ftid/cid), 'gpid:<id>' (venue) or 'kgmid:<id>' (share.google)
   lat            REAL, lng REAL,
   address        TEXT,                        -- when the link or venue carries one
   maps_url       TEXT NOT NULL,               -- canonical link to send back
@@ -1051,7 +1052,7 @@ CREATE TABLE place_links (                     -- resolver cache
   url            TEXT PRIMARY KEY,             -- as pasted
   final_url      TEXT,
   place_id       INTEGER REFERENCES places(id),
-  status         TEXT NOT NULL,                -- 'resolved'|'unnamed'|'failed'|'blocked_host'
+  status         TEXT NOT NULL,                -- 'resolved'|'unnamed'|'not_place'|'failed'|'blocked_host'
   error          TEXT,
   attempts       INTEGER NOT NULL DEFAULT 1,
   resolved_at    TEXT NOT NULL
@@ -1369,7 +1370,7 @@ CREATE TABLE reader_audit (
 );
 ```
 
-#### Implementation notes (M10, v1.32)
+#### Implementation notes (M10, v1.33)
 
 - **Wrapper surface:** `app/reader/telethon_reader.py` is the only module importing Telethon. `ReadOnlyTelegramReader`'s public surface is `ALLOWED_OPERATIONS` = the three reads above plus `resolve` (a chat reference → id, type, title, member count; metadata only, needed to add a chat and apply the guard rails), `log_out` (Disconnect) and `close`. `fetch_new`/`backfill` re-check `reader.enabled` and the `reader_chats` row (enabled + consent) in the DB on every call. Tests: no other module imports Telethon, the public surface equals the allowlist (and no `send_*`/`edit_*`/`delete_*`/read-ack/`UpdateStatusRequest` appears in the module), refused chats never reach Telegram, the client has `receive_updates=False` and device model "Tykee reader (read-only)".
 - **Addressing:** peers are stored as Telethon "marked" ids (users > 0, basic groups `-id`, supergroups `-100…`, the same as Bot API chat ids) plus `access_hash`, so a restart needs no entity cache. Bots are refused too (besides the guard rails above); invite links are refused (the reader never joins).
@@ -1408,7 +1409,7 @@ All settings are read from SQLite on each request, so changes apply instantly wi
 - **Restart needed for:** user display names/timezones (users are loaded at startup) and `embedding.precision`.
 - **Budget:** tiles turn amber at `budget.warn_ratio` (0.8) and red at 100%. When a reply hits the cap, the admin gets one Telegram DM per household day (§14.4).
 - **Visual system (refreshed in M5):** one stylesheet (`static/app.css`) built on semantic tokens with light and dark values (follows the OS setting), system fonts (works offline), one accent colour, green/amber/red only for state and always with text. Sidebar navigation grouped Decisions / Memory / Admin at 1024px and wider, a scrolling nav strip below that; wide tables scroll inside their panel on phones. Skip link, visible focus rings, announced flash messages, 44px touch targets on touch screens, reduced motion respected. No emoji as icons.
-- **Not built in M4:** the `/think` escalation (§7.1), built in v1.33 with its settings on Behaviour. Backups arrived in M6 (§14.2); the Import page arrived in M5 (§15.6).
+- **Not built in M4:** the `/think` escalation (§7.1), built in v1.34 with its settings on Behaviour. Backups arrived in M6 (§14.2); the Import page arrived in M5 (§15.6).
 
 ---
 
@@ -1778,7 +1779,7 @@ Deferred / later: voice notes (requires separate STT), photo input (fridge conte
 | Web access | Agent with Anthropic server-side web search/fetch, orchestrator only, capped, web-sourced memories need approval. Milestone M7, see §7.5. |
 | Import source | Telegram Desktop JSON export, uploaded via the dashboard Import wizard; chats chosen at upload time, see §15.1–15.2. |
 | Group behaviour | Group is primary; bot reads everything and decides when to speak, silent by default, see §10.2. |
-| Account reader | Tykee reads allowlisted chats (starting with the Jack ↔ Jocelyn DM) read-only as Jack (MTProto), records decisions and proposes memories; never posts as Jack; still replies only as the bot in the group. Allowlist managed in the dashboard; per-chat consent required. Milestone M10, see §10.7 (as built: implementation notes, v1.32). |
+| Account reader | Tykee reads allowlisted chats (starting with the Jack ↔ Jocelyn DM) read-only as Jack (MTProto), records decisions and proposes memories; never posts as Jack; still replies only as the bot in the group. Allowlist managed in the dashboard; per-chat consent required. Milestone M10, see §10.7 (as built: implementation notes, v1.33). |
 | Place recommendations | Recommendations around an area with must-haves like pet-friendly, from known places + web discovery, with attribute provenance. **No Google Places API.** Milestone M9, see §10.6 (as built: implementation notes, v1.31). |
 | Google Maps links | Resolved in code (no API, no LLM) to a named place; recorded as a decision when you say you're going; only named businesses stored. Milestone M8, see §10.5. |
 | Group topics | Tykee reads and builds memory from **all** topics (except an optional ignore list) but only speaks in one **answer topic** (initially #Tykee), changeable from the dashboard. Enforced in code; milestone M4, see §10.4. |

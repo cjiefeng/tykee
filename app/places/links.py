@@ -17,7 +17,7 @@ from app.decisions.text import normalise
 LOCATION_SHARED = "⟦location shared⟧"
 MAX_LINKS_PER_MESSAGE = 3
 
-SHORT_HOSTS = frozenset({"maps.app.goo.gl", "goo.gl"})
+SHORT_HOSTS = frozenset({"maps.app.goo.gl", "goo.gl", "share.google"})
 _GOOGLE_HOST = re.compile(r"^(?:www\.|maps\.)?google\.(?:com|[a-z]{2}|com?\.[a-z]{2})$")
 _CONSENT_HOST = re.compile(r"^consent\.google\.(?:com|[a-z]{2}|com?\.[a-z]{2})$")
 _URL_IN_TEXT = re.compile(r"https?://[^\s<>\"'⟦⟧]+")
@@ -57,8 +57,16 @@ def host_allowed(url: str) -> bool:
 
 
 def is_short_link(url: str) -> bool:
-    """Links that need their redirects followed; everything else is parsed as-is."""
-    return _host(url) in SHORT_HOSTS
+    """Links that need their redirects followed; everything else is parsed as-is. Includes the
+    middle hop of a share.google link (``google.<tld>/share.google?q=<id>``)."""
+    host = _host(url)
+    if host in SHORT_HOSTS:
+        return True
+    return (
+        host is not None
+        and _GOOGLE_HOST.match(host) is not None
+        and (urlsplit(url).path == "/share.google")
+    )
 
 
 def is_maps_link(url: str) -> bool:
@@ -70,6 +78,8 @@ def is_maps_link(url: str) -> bool:
         return len(path) > 1
     if host == "goo.gl":
         return path.startswith("/maps/")
+    if host == "share.google":
+        return len(path) > 1  # any Google share; parse_share_search decides if it's a place
     if _GOOGLE_HOST.match(host) is None:
         return False
     return host.startswith("maps.") or path == "/maps" or path.startswith("/maps/")
@@ -193,6 +203,32 @@ def parse_maps_url(url: str) -> ParsedPlace | None:
                 if name is not None:
                     break
     return ParsedPlace(name, address, lat, lng, google_id, precise)
+
+
+def is_share_search(url: str) -> bool:
+    """Where a share.google link ends up: a ``google.<tld>/search`` results page."""
+    host = _host(url)
+    return (
+        host is not None
+        and _GOOGLE_HOST.match(host) is not None
+        and (urlsplit(url).path == "/search")
+    )
+
+
+def parse_share_search(url: str) -> ParsedPlace | None:
+    """The final URL of a share.google link, e.g. ``google.com/search?kgmid=/g/11…&q=<name>&
+    source=sh/x/loc/…``. Only shares Google marks as a location (``/loc/`` in ``source``) with a
+    knowledge-graph id count; anything else (an article, a person, a film) is None. The kgmid is
+    the place's stable id; there are no coordinates. ``name`` None when ``q`` isn't a name."""
+    if not is_share_search(url):
+        return None
+    qs = parse_qs(urlsplit(url).query)
+    kgmid = qs.get("kgmid", [""])[0].strip()
+    raw = qs.get("q", [""])[0]
+    if not kgmid or not raw.strip() or "/loc/" not in qs.get("source", [""])[0]:
+        return None
+    name, address = _split_name(raw)
+    return ParsedPlace(name, address, google_id=f"kgmid:{kgmid}")
 
 
 # --- privacy: named businesses only ----------------------------------------------------------
