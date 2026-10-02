@@ -1,10 +1,10 @@
 {% extends "base.html" %}
 {% block title %}{{ cat.display_name }}{% endblock %}
 {% block content %}
-<p><a href="/categories">← Categories</a></p>
-<h1>{{ cat.display_name }} <code>{{ cat.slug }}</code></h1>
+<a class="crumb" href="/categories">Categories</a>
+<div class="page-head"><div><h1>{{ cat.display_name }}</h1><p class="lede"><code>{{ cat.slug }}</code> {{ cat.description }}</p></div></div>
 {% if cat.merged_into %}<div class="flash error">Merged into another category; edits here have no effect.</div>{% endif %}
-<form method="post" action="/categories/{{ cat.id }}">{{ csrf_input }}
+<form method="post" action="/categories/{{ cat.id }}" class="form-panel">{{ csrf_input }}
   <div class="row">
     <div><label>Display name</label><input type="text" name="display_name" value="{{ cat.display_name }}"></div>
     <div><label>Slug (old one stays as an alias)</label><input type="text" name="slug" value="{{ cat.slug }}"></div>
@@ -17,25 +17,25 @@
 </form>
 
 <h2>Aliases</h2>
-<p>{% for a in aliases %}<form method="post" action="/categories/{{ cat.id }}/aliases/delete" class="inline">{{ csrf_input }}<input type="hidden" name="alias" value="{{ a }}"><span class="pill">{{ a }} <button title="Remove" style="padding:0 .3rem;border:0;background:none">×</button></span></form> {% else %}<span class="muted">none</span>{% endfor %}</p>
-<form method="post" action="/categories/{{ cat.id }}/aliases" class="actions">{{ csrf_input }}<input type="text" name="alias" placeholder="e.g. makan where" style="max-width:260px"><button>Add alias</button></form>
+<div class="chips">{% for a in aliases %}<form method="post" action="/categories/{{ cat.id }}/aliases/delete" class="inline">{{ csrf_input }}<input type="hidden" name="alias" value="{{ a }}"><span class="chip">{{ a }}<button aria-label="Remove alias {{ a }}">×</button></span></form>{% else %}<span class="muted">none</span>{% endfor %}</div>
+<form method="post" action="/categories/{{ cat.id }}/aliases" class="actions">{{ csrf_input }}<input type="text" name="alias" aria-label="New alias" placeholder="e.g. makan where" style="max-width:260px"><button>Add alias</button></form>
 
 <h2>Options</h2>
-<table><tr><th>Name</th><th>Tags</th><th>Weight</th><th>Owner</th><th>Active</th><th>Accepted</th><th>Prefs</th><th></th></tr>
+<div class="table-wrap"><table><tr><th>Name</th><th>Tags</th><th>Weight</th><th>Owner</th><th>Active</th><th>Accepted</th><th>Prefs</th><th></th></tr>
 {% for o in options %}
 <tr><td><form method="post" action="/options/{{ o.id }}" id="o-{{ o.id }}">{{ csrf_input }}<input type="hidden" name="category_id" value="{{ cat.id }}">
-<input type="text" name="name" value="{{ o.name }}"></form></td>
+<input type="text" name="name" aria-label="Option name" value="{{ o.name }}"></form></td>
 <td><input form="o-{{ o.id }}" type="text" name="tags" value="{{ tags_of(o) }}"></td>
 <td><input form="o-{{ o.id }}" type="number" step="any" name="base_weight" value="{{ o.base_weight }}" style="width:5rem"></td>
 <td><select form="o-{{ o.id }}" name="owner">{% for w in owners %}<option {{ 'selected' if w == o.owner }}>{{ w }}</option>{% endfor %}</select></td>
 <td><input form="o-{{ o.id }}" type="checkbox" name="active" {{ 'checked' if o.active }}></td>
 <td>{{ o.accepted }}</td>
 <td class="small">{% for name, m in pref_map.get(o.id, []) %}{{ name }} ×{{ '%.2f' % m }}<br>{% endfor %}
-{% if pref_map.get(o.id) %}<form method="post" action="/options/{{ o.id }}/reset-prefs" class="inline">{{ csrf_input }}<input type="hidden" name="category_id" value="{{ cat.id }}"><button class="small">reset</button></form>{% endif %}</td>
-<td><button form="o-{{ o.id }}">Save</button></td></tr>
-{% else %}<tr><td colspan="8" class="muted">No saved options; Claude suggests some each time and ✅ saves them.</td></tr>{% endfor %}
-</table>
-<form method="post" action="/categories/{{ cat.id }}/options">{{ csrf_input }}
+{% if pref_map.get(o.id) %}<form method="post" action="/options/{{ o.id }}/reset-prefs" class="inline">{{ csrf_input }}<input type="hidden" name="category_id" value="{{ cat.id }}"><button class="sm ghost">Reset</button></form>{% endif %}</td>
+<td><button form="o-{{ o.id }}" class="sm">Save</button></td></tr>
+{% else %}<tr><td colspan="8">No saved options; Claude suggests some each time, and tapping ✅ in Telegram saves them.</td></tr>{% endfor %}
+</table></div>
+<form method="post" action="/categories/{{ cat.id }}/options" class="form-panel">{{ csrf_input }}
   <div class="row"><div><label>New option</label><input type="text" name="name"></div>
   <div><label>Tags (comma separated, e.g. contains:peanut, spicy)</label><input type="text" name="tags"></div>
   <div><label>Owner</label><select name="owner">{% for w in owners %}<option {{ 'selected' if w == 'shared' }}>{{ w }}</option>{% endfor %}</select></div></div>

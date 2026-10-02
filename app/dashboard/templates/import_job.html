@@ -1,45 +1,47 @@
 {% extends "base.html" %}
 {% block title %}Import #{{ job.id }}{% endblock %}
 {% block content %}
-<p><a href="/import">← Import</a></p>
-<h1>Import #{{ job.id }} · {{ job.filename or 'export' }} <span class="pill st-{{ job.status }}">{{ job.status }}</span></h1>
+<a class="crumb" href="/import">Import</a>
+<div class="page-head"><div><h1>Import #{{ job.id }}: {{ job.filename or 'export' }}</h1>
+  <p class="lede"><span class="pill st-{{ job.status }}">{{ job.status }}</span></p></div></div>
 
 {% set step = {'uploaded': 3, 'configured': 5, 'extracting': 6, 'consolidating': 6, 'review': 7, 'applying': 8, 'done': 8}.get(job.status, 0) %}
-<ol class="steps">
+<ol class="steps" aria-label="Import steps">
 {% for n, label in [(1, 'Upload'), (2, 'Validate'), (3, 'Chats & range'), (4, 'Senders'), (5, 'Preview & cost'), (6, 'Run'), (7, 'Review'), (8, 'Apply')] %}
-  <li class="{{ 'done' if n < step or job.status == 'done' else ('on' if n == step or (step == 3 and n == 4) else '') }}">{{ label }}</li>
+  {% set here = n == step or (step == 3 and n == 4) %}
+  <li class="{{ 'done' if n < step or job.status == 'done' else ('on' if here else '') }}"{% if here and job.status != 'done' %} aria-current="step"{% endif %}>{{ label }}</li>
 {% endfor %}
 </ol>
 
 {% set chats = job.meta.get('chats', []) %}
-<div class="card small">
+<div class="callout small">
   {% if job.format == 'account' %}Telegram <b>full-account</b> export: {{ chats | length }} chats with text, {{ job.msg_count }} messages.
   {% else %}Telegram single-chat export: <b>{{ chats[0].name if chats else '?' }}</b>, {{ job.msg_count }} messages{% if chats and chats[0].first %}, {{ chats[0].first[:10] }} → {{ chats[0].last[:10] }}{% endif %}.{% endif %}
-  {% if job.consent_at %}<span class="muted"> · Consent recorded {{ local(job.consent_at) }}.</span>{% endif %}
+  {% if job.consent_at %}<span class="muted"> Consent recorded {{ local(job.consent_at) }}.</span>{% endif %}
 </div>
 
 {# ③ ④: chats, range, senders ------------------------------------------------------------- #}
 {% if job.status == 'uploaded' %}
 <form method="post" action="/import/{{ job.id }}/configure">{{ csrf_input }}
   <h2>Chats & date range</h2>
-  <table><tr><th></th><th>Chat</th><th>Type</th><th>Messages</th><th>From → to</th></tr>
+  <div class="table-wrap"><table><tr><th></th><th>Chat</th><th>Type</th><th>Messages</th><th>From → to</th></tr>
   {% for c in chats %}
-  <tr><td><input type="checkbox" name="chats" value="{{ c.ref }}" {{ 'checked' if c.ref in job.chats }}></td>
-  <td>{{ c.name }}</td><td class="muted small">{{ c.type }}</td><td>{{ c.count }}</td><td class="small">{{ (c.first or '')[:10] }} → {{ (c.last or '')[:10] }}</td></tr>
-  {% endfor %}</table>
+  <tr><td><input type="checkbox" id="chat-{{ loop.index }}" name="chats" value="{{ c.ref }}" {{ 'checked' if c.ref in job.chats }}></td>
+  <td><label for="chat-{{ loop.index }}" style="margin:0;font-size:inherit;color:inherit;font-weight:550">{{ c.name }}</label></td><td class="muted small">{{ c.type }}</td><td>{{ c.count }}</td><td class="small">{{ (c.first or '')[:10] }} → {{ (c.last or '')[:10] }}</td></tr>
+  {% endfor %}</table></div>
   <div class="row">
-    <div><label>From</label><input type="date" name="since" value="{{ job.since }}"></div>
-    <div><label>To</label><input type="date" name="until" value="{{ job.until }}"></div>
+    <div><label for="since">From</label><input id="since" type="date" name="since" value="{{ job.since }}"></div>
+    <div><label for="until">To</label><input id="until" type="date" name="until" value="{{ job.until }}"></div>
   </div>
-  <p class="muted small">Messages already covered by an earlier import are skipped automatically.</p>
+  <p class="help">Messages already covered by an earlier import are skipped automatically.</p>
 
   <h2>Who is who</h2>
   <p class="muted small">"Other" senders are kept as context so conversations make sense, but nothing is ever stored about them.</p>
-  <table><tr><th>Sender</th><th>Telegram id</th><th>Messages</th><th>Is</th></tr>
+  <div class="table-wrap"><table><tr><th>Sender</th><th>Telegram id</th><th>Messages</th><th>Is</th></tr>
   {% for ref, name, n in senders %}
   <tr><td>{{ name }}</td><td><code>{{ ref or '?' }}</code></td><td>{{ n }}</td>
-  <td><select name="sender:{{ ref }}" style="max-width:12rem">{% for who in users + ['other'] %}<option {{ 'selected' if job.sender_map.get(ref) == who }}>{{ who }}</option>{% endfor %}</select></td></tr>
-  {% endfor %}</table>
+  <td><select name="sender:{{ ref }}" aria-label="Who is {{ name }}" style="max-width:12rem">{% for who in users + ['other'] %}<option {{ 'selected' if job.sender_map.get(ref) == who }}>{{ who }}</option>{% endfor %}</select></td></tr>
+  {% endfor %}</table></div>
   <div class="actions"><button class="primary">Preview &amp; estimate cost</button></div>
 </form>
 {% endif %}
@@ -48,27 +50,28 @@
 {% if job.status == 'configured' and preview %}
 <h2>Preview & cost</h2>
 <div class="grid">
-  <div class="card"><h3>Messages</h3><div class="big">{{ preview.messages }}</div><div class="muted small">{{ job.since }} → {{ job.until }}{% if preview.skipped_duplicates %} · {{ preview.skipped_duplicates }} already imported, skipped{% endif %}</div></div>
+  <div class="card"><h3>Messages</h3><div class="big">{{ preview.messages }}</div><div class="muted small">{{ job.since }} → {{ job.until }}{% if preview.skipped_duplicates %}, {{ preview.skipped_duplicates }} already imported and skipped{% endif %}</div></div>
   <div class="card"><h3>Windows</h3><div class="big">{{ preview.windows }}</div><div class="muted small">≈ {{ '{:,}'.format(preview.input_tokens) }} input tokens</div></div>
-  <div class="card"><h3>Estimated cost</h3><div class="big">{{ preview.est_usd | usd }}</div><div class="muted small">extraction (batch, −50%) {{ preview.extract_usd | usd }} + consolidation {{ preview.consolidate_usd | usd }}</div></div>
+  <div class="card"><h3>Estimated cost</h3><div class="big">{{ preview.est_usd | usd }}</div><div class="muted small">extraction (batch, half price) {{ preview.extract_usd | usd }} + consolidation {{ preview.consolidate_usd | usd }}</div></div>
   <div class="card"><h3>Left this month</h3><div class="big {{ 'bad' if preview.est_usd > preview.monthly_left }}">{{ preview.monthly_left | usd }}</div><div class="muted small">counts against the monthly cap only, not the daily one</div></div>
 </div>
-<h3 class="muted small" style="margin-top:1rem">Sample of what Claude will read</h3>
+<h2>Sample of what Claude will read</h2>
 <pre>{% for line in preview.sample %}{{ line }}
 {% endfor %}</pre>
-<form method="post" action="/import/{{ job.id }}/start">{{ csrf_input }}
+<form method="post" action="/import/{{ job.id }}/start" class="form-panel">{{ csrf_input }}
   <label class="check"><input type="checkbox" name="consent" required> Both participants agreed to this import being processed by the Anthropic API.</label>
-  <p class="muted small">Only food, places, entertainment, activities, outings, shopping preferences, routines and diet/allergies are extracted. Health, money, work and relationship talk are skipped and only counted.</p>
-  <div class="actions"><button class="primary">Start import</button></div>
+  <p class="help">Only food, places, entertainment, activities, outings, shopping preferences, routines and diet/allergies are extracted. Health, money, work and relationship talk are skipped and only counted.</p>
+  <div class="actions"><button class="primary">Start import</button>
+    <button form="reconfigure" class="ghost">Change chats, range or senders</button></div>
 </form>
-<form method="post" action="/import/{{ job.id }}/reconfigure" class="actions">{{ csrf_input }}<button>Change chats, range or senders</button></form>
+<form method="post" action="/import/{{ job.id }}/reconfigure" id="reconfigure">{{ csrf_input }}</form>
 {% endif %}
 
 {# ⑥ run -------------------------------------------------------------------------------------- #}
 {% if job.status in ('extracting', 'consolidating') %}
 <h2>Running</h2>
 {% include "_import_progress.html" %}
-<form method="post" action="/import/{{ job.id }}/cancel" class="actions" onsubmit="return confirm('Cancel this import? The batch is stopped; what was spent so far is not refunded.')">{{ csrf_input }}<button class="danger">Cancel</button></form>
+<form method="post" action="/import/{{ job.id }}/cancel" class="actions" onsubmit="return confirm('Cancel this import? The batch is stopped; what was spent so far is not refunded.')">{{ csrf_input }}<button class="danger">Cancel import</button></form>
 {% endif %}
 
 {% if job.status in ('failed', 'cancelled') %}
@@ -83,33 +86,33 @@
 <p class="muted">Review the <b>categories first</b>: approved categories and their aliases are what Tykee recognises from day one. Rejecting a category drops its options and decisions. {{ job.skipped_out_of_scope }} out-of-scope discussions were skipped (counted only).</p>
 {% endif %}
 
-<nav class="tabs">{% for t in tabs %}{% set k = {'categories': 'category', 'options': 'option', 'notes': 'note', 'decisions': 'decision', 'unmapped': 'unmapped'}[t] %}{% set c = counts.get(k, {}) %}
-  <a href="/import/{{ job.id }}?tab={{ t }}" class="{{ 'on' if t == tab }}">{{ t | capitalize }} <span class="muted small">{{ (c.values() | sum) }}{% if c.get('approved') %} · {{ c.approved }}✓{% endif %}</span></a>
+<nav class="tabs" aria-label="Review">{% for t in tabs %}{% set k = {'categories': 'category', 'options': 'option', 'notes': 'note', 'decisions': 'decision', 'unmapped': 'unmapped'}[t] %}{% set c = counts.get(k, {}) %}
+  <a href="/import/{{ job.id }}?tab={{ t }}"{% if t == tab %} aria-current="page"{% endif %}>{{ t | capitalize }}<span class="count">{{ (c.values() | sum) }}{% if c.get('approved') %}, {{ c.approved }} approved{% endif %}</span></a>
 {% endfor %}</nav>
 
 {% if job.status == 'review' and tab != 'unmapped' %}
-<form method="post" action="/import/{{ job.id }}/bulk" class="actions">{{ csrf_input }}<input type="hidden" name="tab" value="{{ tab }}">
-  <span>Approve all pending {{ tab }} with confidence ≥</span><input type="number" name="min_conf" value="0.8" step="0.05" min="0" max="1" style="width:5rem"><button>Approve</button></form>
+<form method="post" action="/import/{{ job.id }}/bulk" class="actions" style="margin-top:0;margin-bottom:var(--s3)">{{ csrf_input }}<input type="hidden" name="tab" value="{{ tab }}">
+  <label for="min_conf" style="margin:0">Approve all pending {{ tab }} with confidence ≥</label><input id="min_conf" type="number" name="min_conf" value="0.8" step="0.05" min="0" max="1" style="width:6rem;flex:none"><button class="sm">Approve these</button></form>
 {% endif %}
 
 {% macro decide(it) %}{% if job.status == 'review' and it.status in ('pending', 'approved', 'rejected') %}
 <form method="post" action="/import/{{ job.id }}/items/{{ it.id }}" class="inline">{{ csrf_input }}<input type="hidden" name="tab" value="{{ tab }}">
-  {% if it.status != 'approved' %}<button name="action" value="approve" class="primary">✓</button>{% endif %}
-  {% if it.status != 'rejected' %}<button name="action" value="reject">✕</button>{% endif %}</form>{% endif %}
-<span class="pill st-{{ it.status }}">{{ it.status }}</span>{% endmacro %}
+  <span class="btn-row">{% if it.status != 'approved' %}<button name="action" value="approve" class="primary sm">Approve</button>{% endif %}
+  {% if it.status != 'rejected' %}<button name="action" value="reject" class="sm">Reject</button>{% endif %}</span></form>{% endif %}
+<div style="margin-top:6px"><span class="pill st-{{ it.status }}">{{ it.status }}</span></div>{% endmacro %}
 
-{% macro quotes(ev) %}{% for e in ev %}<div class="quote">{{ e.date }}{% if e.summary %} · {{ e.summary }}{% endif %}{% for q in e.get('quotes', []) %}<br>“{{ q }}”{% endfor %}{% if e.quote %} “{{ e.quote }}”{% endif %}</div>{% endfor %}{% endmacro %}
+{% macro quotes(ev) %}{% for e in ev %}<div class="quote"><span class="when">{{ e.date }}</span>{% if e.summary %} {{ e.summary }}{% endif %}{% for q in e.get('quotes', []) %}<br>“{{ q }}”{% endfor %}{% if e.quote %} “{{ e.quote }}”{% endif %}</div>{% endfor %}{% endmacro %}
 
 {% if tab == 'categories' %}
-<table><tr><th>Category</th><th>Episodes</th><th>τ / N</th><th>Aliases</th><th>Conf.</th><th></th></tr>
+<div class="table-wrap"><table><tr><th>Category</th><th>Episodes</th><th>τ / N</th><th>Aliases</th><th>Conf.</th><th></th></tr>
 {% for it in items %}{% set p = it.payload %}
-<tr class="{{ 'muted' if it.status in ('rejected', 'merged') }}"><td><b>{{ p.display_name }}</b> <code>{{ p.slug }}</code>{% if p.existing_id %} <span class="pill">existing</span>{% endif %}
+<tr class="{{ 'muted' if it.status in ('rejected', 'merged') }}"><td><span class="item-title">{{ p.display_name }}</span> <code>{{ p.slug }}</code>{% if p.existing_id %} <span class="pill">existing</span>{% endif %}
   <div class="small">{{ p.description }}</div>
   {% for f in p.flags %}<div class="small warn">{{ f }}</div>{% endfor %}
   {% if it.status == 'merged' %}<div class="small">merged into another proposal</div>{% endif %}
-  <details class="small"><summary>sample episodes</summary>{{ quotes(it.evidence) }}</details>
+  <details class="small box"><summary>sample episodes</summary>{{ quotes(it.evidence) }}</details>
   {% if job.status == 'review' and it.status != 'merged' %}
-  <details class="small"><summary>edit / merge</summary>
+  <details class="small box"><summary>edit / merge</summary>
     <form method="post" action="/import/{{ job.id }}/categories/{{ it.id }}">{{ csrf_input }}
       <div class="row"><div><label>Name</label><input type="text" name="display_name" value="{{ p.display_name }}"></div>
       <div><label>Slug</label><input type="text" name="slug" value="{{ p.slug }}"></div>
@@ -125,14 +128,14 @@
   </details>{% endif %}</td>
 <td>{{ p.episode_ids | length }}</td><td>{{ p.recency_tau_days }} / {{ p.default_n }}</td>
 <td class="small">{{ p.aliases | join(', ') }}</td><td>{{ '%.2f' % it.confidence }}</td><td>{{ decide(it) }}</td></tr>
-{% else %}<tr><td colspan="6" class="muted">No categories proposed.</td></tr>{% endfor %}
-</table>
+{% else %}<tr><td colspan="6">No categories proposed.</td></tr>{% endfor %}
+</table></div>
 
 {% elif tab == 'options' %}
-<table><tr><th>Option</th><th>Category</th><th>Weight</th><th>Prefs</th><th>Evidence</th><th>Conf.</th><th></th></tr>
+<div class="table-wrap"><table><tr><th>Option</th><th>Category</th><th>Weight</th><th>Prefs</th><th>Evidence</th><th>Conf.</th><th></th></tr>
 {% for it in items %}{% set p = it.payload %}{% set cat_off = cat_status.get(it.category_item_id) == 'rejected' %}
-<tr class="{{ 'muted' if it.status == 'rejected' or cat_off }}"><td><b>{{ p.name }}</b>{% if p.existing %} <span class="pill">existing</span>{% endif %}<div class="small muted">{{ p.tags | join(', ') }}</div>
-  {% if job.status == 'review' %}<details class="small"><summary>edit</summary>
+<tr class="{{ 'muted' if it.status == 'rejected' or cat_off }}"><td><span class="item-title">{{ p.name }}</span>{% if p.existing %} <span class="pill">existing</span>{% endif %}<div class="small muted">{{ p.tags | join(', ') }}</div>
+  {% if job.status == 'review' %}<details class="small box"><summary>edit</summary>
   <form method="post" action="/import/{{ job.id }}/options/{{ it.id }}">{{ csrf_input }}
     <div class="row"><div><label>Name</label><input type="text" name="name" value="{{ p.name }}"></div>
     <div><label>Tags</label><input type="text" name="tags" value="{{ p.tags | join(', ') }}"></div>
@@ -142,53 +145,54 @@
 <td>{{ p.base_weight }}</td>
 <td class="small">{% for u, m in p.prefs.items() %}{{ u }} ×{{ m }}<br>{% endfor %}<span class="muted">{{ p.mentions }} mentions, sentiment {{ p.sentiment }}</span></td>
 <td class="small">{{ quotes(it.evidence[:3]) }}</td><td>{{ '%.2f' % it.confidence }}</td><td>{{ decide(it) }}</td></tr>
-{% else %}<tr><td colspan="7" class="muted">No options.</td></tr>{% endfor %}
-</table>
+{% else %}<tr><td colspan="7">No options.</td></tr>{% endfor %}
+</table></div>
 
 {% elif tab == 'notes' %}
-<table><tr><th>Note</th><th>Lines</th><th>Conf.</th><th></th></tr>
+<div class="table-wrap"><table><tr><th>Note</th><th>Lines</th><th>Conf.</th><th></th></tr>
 {% for it in items %}{% set p = it.payload %}
 <tr class="{{ 'muted' if it.status == 'rejected' }}"><td><code>{{ p.path }}</code><div class="small muted">{{ p.owner }}{{ ' · pinned profile' if p.path.startswith('people/') or p.path == 'shared/household.md' }}</div></td>
-<td>{% for ln in p.lines %}<div>• {{ ln.text }} <span class="muted small">{{ '%.2f' % ln.confidence }}</span>{{ quotes(ln.evidence[:2]) }}</div>{% endfor %}
-  {% if job.status == 'review' %}<details class="small"><summary>edit lines</summary>
+<td>{% for ln in p.lines %}<div style="margin-bottom:6px">{{ ln.text }} <span class="muted small">{{ '%.2f' % ln.confidence }}</span>{{ quotes(ln.evidence[:2]) }}</div>{% endfor %}
+  {% if job.status == 'review' %}<details class="small box"><summary>edit lines</summary>
   <form method="post" action="/import/{{ job.id }}/notes/{{ it.id }}">{{ csrf_input }}
     <textarea name="text">{% for ln in p.lines %}{{ ln.text }}
 {% endfor %}</textarea><div class="actions"><button>Save</button></div></form></details>{% endif %}</td>
 <td>{{ '%.2f' % it.confidence }}</td><td>{{ decide(it) }}</td></tr>
-{% else %}<tr><td colspan="4" class="muted">No notes.</td></tr>{% endfor %}
-</table>
+{% else %}<tr><td colspan="4">No notes.</td></tr>{% endfor %}
+</table></div>
 
 {% elif tab == 'decisions' %}
-<table><tr><th>When</th><th>Category</th><th>Choice</th><th>For</th><th>Context</th><th>Conf.</th><th></th></tr>
+<div class="table-wrap"><table><tr><th>When</th><th>Category</th><th>Choice</th><th>For</th><th>Context</th><th>Conf.</th><th></th></tr>
 {% for it in items %}{% set p = it.payload %}{% set cat_off = cat_status.get(it.category_item_id) == 'rejected' %}
 <tr class="{{ 'muted' if it.status == 'rejected' or cat_off }}"><td class="small">{{ local(p.ts, '%Y-%m-%d %H:%M') }}</td><td><code>{{ p.category_slug }}</code></td>
 <td><b>{{ p.choice }}</b></td><td>{{ p.for_users }}</td><td class="small">{{ p.summary }}{{ quotes(it.evidence) }}</td>
 <td>{{ '%.2f' % it.confidence }}</td><td>{{ decide(it) }}</td></tr>
-{% else %}<tr><td colspan="7" class="muted">No decisions.</td></tr>{% endfor %}
-</table>
+{% else %}<tr><td colspan="7">No decisions.</td></tr>{% endfor %}
+</table></div>
 
 {% else %}
 <p class="muted small">Decision episodes that didn't fit a recurring category. Assign one to a category to keep it (a chosen one becomes a decision to review).</p>
-<table><tr><th>When</th><th>Kind</th><th>What</th><th>Why unmapped</th><th></th></tr>
+<div class="table-wrap"><table><tr><th>When</th><th>Kind</th><th>What</th><th>Why unmapped</th><th></th></tr>
 {% for it in items %}{% set p = it.payload %}
 <tr><td class="small">{{ local(p.ts, '%Y-%m-%d') }}</td><td>{{ p.category_phrase }}</td><td class="small">{{ p.summary }}{% if p.choice %} → <b>{{ p.choice }}</b>{% endif %}</td><td class="small">{{ p.why }}</td>
-<td>{% if job.status == 'review' and it.status == 'info' and categories %}<form method="post" action="/import/{{ job.id }}/unmapped/{{ it.id }}" class="inline">{{ csrf_input }}
-  <select name="category" style="max-width:10rem">{% for o in categories %}<option value="{{ o.id }}">{{ o.payload.slug }}</option>{% endfor %}</select><button>Assign</button></form>
+<td>{% if job.status == 'review' and it.status == 'info' and categories %}<form method="post" action="/import/{{ job.id }}/unmapped/{{ it.id }}" class="btn-row">{{ csrf_input }}
+  <select name="category" aria-label="Category" style="max-width:10rem">{% for o in categories %}<option value="{{ o.id }}">{{ o.payload.slug }}</option>{% endfor %}</select><button class="sm">Assign</button></form>
   {% else %}<span class="pill">{{ it.status }}</span>{% endif %}</td></tr>
-{% else %}<tr><td colspan="5" class="muted">Every episode found a category.</td></tr>{% endfor %}
-</table>
+{% else %}<tr><td colspan="5">Every episode found a category.</td></tr>{% endfor %}
+</table></div>
 {% endif %}
 
 {% if job.status == 'review' %}
 <h2>Apply</h2>
-<div class="card">
+<div class="form-panel">
   <p>Approved so far: {% for k, label in [('category', 'categories'), ('option', 'options'), ('note', 'notes'), ('decision', 'decisions')] %}<b>{{ counts.get(k, {}).get('approved', 0) }}</b> {{ label }}{{ ', ' if not loop.last }}{% endfor %}. Pending items are left out.</p>
   <form method="post" action="/import/{{ job.id }}/apply" onsubmit="return confirm('Apply the approved items? Raw chat text is purged afterwards.')">{{ csrf_input }}
     <label class="check"><input type="checkbox" name="delete_export" checked> Delete the uploaded export file afterwards</label>
-    <div class="actions"><button class="primary">Apply</button>
-    <span class="muted small">Writes categories, options, preferences and decision history in one go, appends notes to the vault, then deletes the raw chat text kept for extraction.</span></div>
+    <p class="help">Writes categories, options, preferences and decision history in one go, appends notes to the vault, then deletes the raw chat text kept for extraction.</p>
+    <div class="actions" style="justify-content:space-between"><button class="primary">Apply</button>
+      <button form="discard" class="danger">Discard import</button></div>
   </form>
-  <form method="post" action="/import/{{ job.id }}/cancel" class="actions" onsubmit="return confirm('Discard this import without applying anything?')">{{ csrf_input }}<button class="danger">Discard</button></form>
+  <form method="post" action="/import/{{ job.id }}/cancel" id="discard" onsubmit="return confirm('Discard this import without applying anything?')">{{ csrf_input }}</form>
 </div>
 {% endif %}
 {% endif %}

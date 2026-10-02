@@ -979,6 +979,7 @@ All settings are read from SQLite on each request, so changes apply instantly wi
 - **Settings:** besides the purpose-built pages, a **Settings** page lists every key as JSON. Every dashboard write is validated against the whole settings set (`RuntimeSettings`) before it's saved, so a typo never reaches the running bot. Persona edits keep the last 20 versions in `persona.history`, restorable from Behaviour.
 - **Restart needed for:** user display names/timezones (users are loaded at startup) and `embedding.precision`.
 - **Budget:** tiles turn amber at `budget.warn_ratio` (0.8) and red at 100%. When a reply hits the cap, the admin gets one Telegram DM per household day (§14.4).
+- **Visual system (refreshed in M5):** one stylesheet (`static/app.css`) built on semantic tokens with light and dark values (follows the OS setting), system fonts (works offline), one accent colour, green/amber/red only for state and always with text. Sidebar navigation grouped Decisions / Memory / Admin at 1024px and wider, a scrolling nav strip below that; wide tables scroll inside their panel on phones. Skip link, visible focus rings, announced flash messages, 44px touch targets on touch screens, reduced motion respected. No emoji as icons.
 - **Not built in M4:** the `/think` escalation heuristic (§7.1) has no dashboard control because it doesn't exist yet; `models.escalated` is editable for when it does. Backups (M6) show a placeholder; the Import page arrived in M5 (§15.6).
 
 ---

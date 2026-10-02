@@ -1,19 +1,21 @@
 {% extends "base.html" %}
 {% block title %}Import{% endblock %}
 {% block content %}
-<h1>Import chat history</h1>
-<p class="muted">Teach Tykee from your past Telegram chats: decisions you made, places and food you like, constraints. Nothing is sent to Claude until you've reviewed the estimate and both agreed.</p>
+<div class="page-head"><div><h1>Import chat history</h1>
+  <p class="lede">Teach Tykee from your past Telegram chats: decisions you made, places and food you like, constraints. Nothing is sent to Claude until you've reviewed the estimate and both agreed.</p></div></div>
 
 {% if not available %}<div class="flash error">The import isn't available in this process.</div>{% endif %}
 
-<div class="card">
-  <h3>Upload an export</h3>
-  <form method="post" action="/import/upload" enctype="multipart/form-data" class="actions">{{ csrf_input }}
-    <input type="file" name="export" accept=".json,.zip,application/json,application/zip" required>
-    <button class="primary">Upload &amp; check</button>
-    <span class="muted small">result.json or a .zip of the export folder, up to {{ max_mb }} MB</span>
+<div class="form-panel">
+  <form method="post" action="/import/upload" enctype="multipart/form-data">{{ csrf_input }}
+    <label for="export">Telegram export</label>
+    <div class="btn-row" style="width:100%">
+      <input id="export" type="file" name="export" accept=".json,.zip,application/json,application/zip" required style="flex:1 1 18rem;width:auto">
+      <button class="primary">Upload &amp; check</button>
+    </div>
+    <p class="help">result.json or a .zip of the export folder, up to {{ max_mb }} MB.</p>
   </form>
-  <details class="small"><summary>How to export from Telegram</summary>
+  <details class="box"><summary>How to export from Telegram</summary>
     <ol>
       <li>Install <b>Telegram Desktop</b> (desktop.telegram.org) and log in. The phone apps and the App Store "Telegram for macOS" can't export this way.</li>
       <li>Open the chat (your DM with each other, and/or the group), click <b>⋮</b> → <b>Export chat history</b>.</li>
@@ -26,12 +28,12 @@
 </div>
 
 <h2>Imports</h2>
-<table><tr><th>#</th><th>File</th><th>Status</th><th>Messages</th><th>Windows</th><th>Cost</th><th>Uploaded</th></tr>
+<div class="table-wrap"><table><tr><th>#</th><th>File</th><th>Status</th><th>Messages</th><th>Windows</th><th>Cost</th><th>Uploaded</th></tr>
 {% for j in jobs %}
 <tr><td><a href="/import/{{ j.id }}">{{ j.id }}</a></td><td><a href="/import/{{ j.id }}">{{ j.filename or j.file_sha256[:12] }}</a></td>
 <td><span class="pill st-{{ j.status }}">{{ j.status }}</span></td><td>{{ j.msg_count }}</td><td>{{ j.window_count or '' }}</td>
 <td>{{ j.cost_usd | usd }}{% if j.est_cost_usd and j.status in ('uploaded', 'configured') %} <span class="muted small">(est. {{ j.est_cost_usd | usd }})</span>{% endif %}</td>
 <td class="small">{{ local(j.created_at) }}</td></tr>
-{% else %}<tr><td colspan="7" class="muted">Nothing imported yet.</td></tr>{% endfor %}
-</table>
+{% else %}<tr><td colspan="7">Nothing imported yet. Upload an export above to start.</td></tr>{% endfor %}
+</table></div>
 {% endblock %}

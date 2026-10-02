@@ -1,2 +1,2 @@
-<tr id="inbox-{{ item.id }}"><td>{{ item.content }}</td><td class="small">{{ item.target_path or '—' }}</td><td></td>
-<td><span class="pill {{ 'ok' if item.status == 'approved' else 'muted' }}">{{ item.status }}</span></td></tr>
+<tr id="inbox-{{ item.id }}"><td>{{ item.content }}</td><td class="small">{{ item.target_path or 'none' }}</td><td></td>
+<td><span class="pill st-{{ item.status }}">{{ item.status }}</span></td></tr>

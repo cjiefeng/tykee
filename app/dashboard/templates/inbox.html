@@ -1,18 +1,19 @@
 {% extends "base.html" %}
 {% block title %}Inbox{% endblock %}
 {% block content %}
-<p><a href="/memory">← Memory</a></p>
-<h1>Memory inbox</h1>
-<p>{% for s in ["pending", "approved", "rejected"] %}<a href="/memory/inbox?status={{ s }}" class="pill" style="{{ 'font-weight:700' if s == status }}">{{ s }}</a> {% endfor %}</p>
-<table><tr><th>What</th><th>Where</th><th>Why / source</th><th></th></tr>
+<a class="crumb" href="/memory">Memory</a>
+<div class="page-head"><div><h1>Memory inbox</h1>
+  <p class="lede">Things Tykee inferred or heard in other topics. Nothing is saved until you approve it.</p></div></div>
+<nav class="tabs" aria-label="Inbox status">{% for s in ["pending", "approved", "rejected"] %}<a href="/memory/inbox?status={{ s }}"{% if s == status %} aria-current="page"{% endif %}>{{ s | capitalize }}</a>{% endfor %}</nav>
+<div class="table-wrap"><table><tr><th>What</th><th>Where</th><th>Why / source</th><th><span class="sr-only">Decision</span></th></tr>
 {% for i in items %}
-<tr id="inbox-{{ i.id }}"><td>{% if i.kind == 'category' %}🗂 {% elif i.kind == 'option' %}➕ {% endif %}{{ i.content }}<div class="muted small">{{ local(i.created_at) }} · {{ i.kind }}</div></td>
-<td class="small">{{ i.target_path or '—' }}<div class="muted">{{ i.owner }}</div></td>
+<tr id="inbox-{{ i.id }}"><td>{% if i.kind != 'note' %}<span class="pill accent">{{ 'new category' if i.kind == 'category' else 'new option' }}</span> {% endif %}{{ i.content }}<div class="muted small">{{ local(i.created_at) }}</div></td>
+<td class="small">{{ i.target_path or 'none' }}<div class="muted">{{ i.owner }}</div></td>
 <td class="small">{{ i.reason or '' }}<div class="muted">{{ i.source or '' }}</div></td>
 <td>{% if i.status == 'pending' %}
-  <form hx-post="/memory/inbox/{{ i.id }}" hx-target="#inbox-{{ i.id }}" hx-swap="outerHTML" method="post" action="/memory/inbox/{{ i.id }}" class="inline">{{ csrf_input }}
-    <button name="action" value="approve" class="primary">Save</button> <button name="action" value="reject">Drop</button></form>
-{% else %}<span class="pill">{{ i.status }}</span>{% endif %}</td></tr>
-{% else %}<tr><td colspan="4" class="muted">Nothing here.</td></tr>{% endfor %}
-</table>
+  <form hx-post="/memory/inbox/{{ i.id }}" hx-target="#inbox-{{ i.id }}" hx-swap="outerHTML" method="post" action="/memory/inbox/{{ i.id }}" class="btn-row">{{ csrf_input }}
+    <button name="action" value="approve" class="primary sm">Save</button> <button name="action" value="reject" class="sm">Drop</button></form>
+{% else %}<span class="pill st-{{ i.status }}">{{ i.status }}</span>{% endif %}</td></tr>
+{% else %}<tr><td colspan="4">Nothing here.</td></tr>{% endfor %}
+</table></div>
 {% endblock %}
