@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **Status** | Draft v1.27 (M8 as built: 👌 reaction since 📍 isn't a bot reaction, code-only "eating here" in the answer topic, §10.5) |
+| **Status** | Draft v1.30 (account reader: chat allowlist is dashboard-only; env option removed, §10.7) |
 | **Name** | Tykee: phonetic spelling of Tyche, the Greek goddess of chance. Telegram handle e.g. `@TykeeBot` (must end in "bot") |
 | **Author** | Jack |
 | **Date** | 2026-10-01 |
@@ -1227,6 +1227,127 @@ CREATE TABLE place_attributes (
 
 Known-places answers cost one normal orchestrator call. Discovery adds 1–2 web searches plus their result tokens, inside the M7 daily cap and budget rules; when web tools are disabled (cap or budget), Tykee answers from known places only and says so if there's a shortfall.
 
+### 10.7 Read-only account reader: configurable chats (M10)
+
+Tykee can also learn from chats the bot isn't in, starting with the **private chat between Jack and Jocelyn (partner)**. A bot can't join a private chat between two people, so this uses Telegram's client API (MTProto) logged in **as Jack**, strictly **read-only**. **Which chats it may read is configured in the dashboard.** Nothing about how Tykee speaks changes: it still only replies **as the bot**, only in the group's answer topic (§10.2, §10.4).
+
+#### What it can and can't do
+
+| Can | Can't (enforced in code) |
+|---|---|
+| Read new messages in chats on the **reader allowlist** (§ "Choosing which chats") | Send, edit, delete, forward or react to anything |
+| Optionally backfill history from an allowlisted chat for the import (§15) | Mark messages as read, send typing or online status |
+| List recent chat *names* on demand, only when the admin presses "Pick from my chats" | Read messages from any chat not on the allowlist |
+| | Receive Telegram's live update stream (it polls allowlisted chats instead) |
+
+**Read-only by construction:** the Telethon client is wrapped in a `ReadOnlyTelegramReader` class that exposes exactly three operations:
+- `fetch_new(chat, min_id)` and `backfill(chat, since)`, built on `iter_messages`. Both **refuse any chat that isn't an enabled, consented row in `reader_chats`**, checked on every call, not cached.
+- `list_dialog_names(limit=50)`: names, ids and types only, no message content. Used by the dashboard picker.
+
+The raw client is private to that module. A unit test fails the build if anything else imports Telethon, another asserts the wrapper has no methods beyond the allowlist, and another asserts `fetch_new`/`backfill` reject non-allowlisted chats. The client is created with `receive_updates=False`, so it never subscribes to updates from other chats. It never calls `send_*`, `edit_*`, `delete_*`, `send_read_acknowledge` or `account.updateStatus`.
+
+#### Choosing which chats (dashboard)
+
+The allowlist is managed **only in the dashboard**; there is no env/Docker configuration for it. Dashboard → System → Account reader → **Chats**:
+
+| Action | How |
+|---|---|
+| Add a chat | Enter `@username`, a numeric id, or a `t.me/...` link (resolved via `get_entity`), **or** press **Pick from my chats** to choose from your 50 most recent chat names (fetched on demand, not stored except the one picked). For a forum group, optionally pick one topic. |
+| Per-chat settings | Label, enabled, polling interval (default 30 min), raw retention days (default 7), consent checkbox |
+| Remove | Disables reading immediately and deletes the chat's unharvested raw text; extracted decisions/facts stay |
+
+Guard rails:
+- Adding a chat, or ticking consent, requires **re-entering the admin password** (step-up auth), and the bot DMs the admin: *"Tykee reader: '<label>' added to readable chats"*. A stolen dashboard session alone can't quietly widen access.
+- **Not allowed:** the group Tykee's bot already lives in (the bot reads it, §10.4), channels, and Saved Messages. Large groups (> `reader.max_group_members`, default 20) are refused, to keep this to personal/close-circle chats.
+- Every change is recorded in an audit log shown on the same page.
+
+#### Consent (per chat)
+
+Other people's messages in these chats are processed by Tykee and sent to the Anthropic API (harvester batches only). Each chat needs its own consent checkbox before anything is read:
+- DM: *"<person> agreed to Tykee reading our private chat."*
+- Group/topic: *"Everyone in <chat> agreed to Tykee reading it."*
+
+Recorded in `reader_chats.consent_at`. Unticking consent stops reading that chat immediately.
+
+Senders who aren't Tykee users (Jack/Jocelyn) are mapped to `other`. Their messages are used only as context for decision episodes; facts about third parties are dropped (§15.4).
+
+#### How it runs (fits the existing harvester, §10.4)
+
+```
+every reader chat's interval (default 30 min), pure code:
+  for each enabled + consented reader_chats row:
+    1. fetch_new(chat, min_id = cursor)          ← one API request per chat
+    2. persist new messages to `messages` with source='account_reader',
+       chat_id = peer id (+ thread_id for a topic), senders mapped to users or 'other'
+    3. advance cursor
+then the normal harvester tick (§10.4) sees new unharvested rows:
+  - nothing new → stop (no LLM)
+  - new messages → Haiku-tier harvest with the decision-episode schema (§15.3.1)
+    and safe-topic rules (§15.4: no health, money, work or relationship talk):
+      chosen episodes → decisions(source='observed', status='accepted') → vault log mirror
+      facts           → memory inbox (auto_approve respected)
+      places / Maps links → M8 resolver, place notes
+```
+
+- Decisions only map to **existing** categories (same as the harvester); new kinds of decision show up as suggestions in the inbox.
+- Decisions from a DM between Jack and Jocelyn default to `for_users='both'`; from a group, the harvester infers it from who took part.
+- What Tykee learns is shared memory, so it can use it when answering in the Tykee group ("you two settled on Japanese for Friday").
+- **Retention:** raw text is deleted `retention_days` (per chat, default 7) after it's been harvested. Only the extracted decisions, approved facts and places remain.
+
+#### Login & session security
+
+- **One-time login from the NAS shell**, not the dashboard: `docker exec -it tykee python -m app.reader.login`. It asks for the phone number, the login code and the 2FA password (never stored), then saves a Telethon `StringSession`.
+- The session is **encrypted at rest** (Fernet) in `/data/reader.session.enc`; the key comes from env `READER_SESSION_KEY`, which is kept out of `/data` and therefore out of backups. Backups never contain a usable session.
+- `api_id` / `api_hash` from my.telegram.org go in `.env` (`TG_API_ID`, `TG_API_HASH`).
+- The session appears in Telegram → Settings → Devices as **"Tykee reader (read-only)"** (`device_model` / `app_version` set accordingly), so it's visible and can be terminated from any phone at any time.
+- **Kill switch:** dashboard → System → Account reader → **Disconnect** calls `log_out()` (removes the session from Telegram) and deletes the encrypted file. If Telegram reports the session revoked, the reader disables itself, shows a red health tile, and DMs the admin via the bot.
+- Rate: one `iter_messages` call per chat per interval, with `FloodWaitError` honoured (sleep, then resume). Low-frequency, read-only use keeps the account-ban risk minimal.
+
+#### Settings
+
+| Key / env | Default | Purpose |
+|---|---|---|
+| `reader.enabled` | `false` | Master switch (requires a valid session) |
+| `reader.max_group_members` | 20 | Groups larger than this can't be added |
+| `reader.default_interval_min` | 30 | Default polling interval for new chats |
+| `reader.default_retention_days` | 7 | Default raw-text retention for new chats |
+
+The page also shows, per chat: last fetch time, messages fetched today, last harvest result, status, and a **Backfill** button that pulls up to 6 months of that chat into the import pipeline (§15) instead of a manual Telegram export, with the same review steps.
+
+#### Data model (M10 migration)
+
+**Chat id collision:** from Jack's account a DM's peer id is the other person's user id, which is also the `chat_id` of the *bot's* private chat with that person (e.g. Jocelyn). Rows are therefore separated by `messages.source`: conversation history, the judge, and DM replies only read `source='bot'`; the harvester reads `source='account_reader'` for reader chats. Every query touching `messages` by `chat_id` must also filter by `source` (enforced in the messages repository, with a test).
+
+```sql
+ALTER TABLE messages ADD COLUMN source TEXT NOT NULL DEFAULT 'bot';   -- 'bot' | 'account_reader'
+CREATE UNIQUE INDEX ux_messages_reader ON messages(source, chat_id, tg_message_id)
+  WHERE source = 'account_reader';
+
+CREATE TABLE reader_chats (
+  id              INTEGER PRIMARY KEY,
+  peer_id         INTEGER NOT NULL,            -- resolved numeric id
+  kind            TEXT NOT NULL,               -- 'user' | 'group' | 'topic'
+  thread_id       INTEGER,                     -- forum topic, when kind='topic'
+  label           TEXT NOT NULL,
+  enabled         INTEGER NOT NULL DEFAULT 1,
+  consent_at      TEXT,                        -- NULL = not readable
+  interval_min    INTEGER NOT NULL DEFAULT 30,
+  retention_days  INTEGER NOT NULL DEFAULT 7,
+  last_msg_id     INTEGER NOT NULL DEFAULT 0,  -- Telegram message id cursor
+  last_fetch_at   TEXT,
+  status          TEXT NOT NULL DEFAULT 'idle',-- 'idle'|'ok'|'flood_wait'|'revoked'|'not_found'|'error'
+  UNIQUE (peer_id, thread_id)
+);
+
+CREATE TABLE reader_audit (
+  id          INTEGER PRIMARY KEY,
+  action      TEXT NOT NULL,                   -- 'add'|'remove'|'enable'|'disable'|'consent'|'unconsent'|'login'|'logout'
+  chat_label  TEXT,
+  actor       TEXT NOT NULL,                   -- 'dashboard' | 'system'
+  created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+```
+
 ---
 
 ## 11. Admin dashboard
@@ -1269,6 +1390,7 @@ All settings are read from SQLite on each request, so changes apply instantly wi
 | Prompt injection via notes / user text | Tools are narrow; `write_note` path-restricted to vault folders; pinned notes immutable implicitly; no shell tools. The only network access is Anthropic's server-side web search/fetch (M7). |
 | Prompt injection / bad data via web content (M7) | Web results treated as untrusted data; web-sourced memories always require human approval in the inbox; web tools only on the orchestrator call; optional domain allow/block lists; daily search cap (§7.5). |
 | SSRF via pasted links (M8) | `PlaceResolver` only fetches Maps short links and follows redirects hop by hop on allowlisted Google hosts (http(s), default ports, no userinfo, no env proxy), max 5 requests in 5 s, never reads response bodies; all other URLs are left untouched. |
+| Account session = full access to Jack's Telegram (M10) | Read-only wrapper with method allowlist + tests; per-call check against enabled+consented `reader_chats`; no update stream; dashboard allowlist changes need step-up password + bot DM alert + audit log; session encrypted with a key outside `/data` (never in backups); visible as "Tykee reader (read-only)" in Telegram Devices; one-click Disconnect (`log_out`); auto-disable on revocation. |
 | Path traversal in note paths | Resolve and enforce `vault_root in path.parents`; reject symlinks. |
 | Bot reads all group messages | Only the configured group and allowlisted senders are persisted; topics in `telegram.ignored_topic_ids` are dropped unread. Other topics are read and stored with `thread_id` and sent to Anthropic only in harvester batches (Haiku-tier, topic allowlist, §10.4); Tykee speaks only in the answer topic. Both users know the bot is listening (stated on join). |
 | Cross-user leakage (in chat) | Owner filter in retrieval and pinned injection; one user's private memories only enter the other's chat when `for_users=both`, and then only constraint-type notes. **Accepted:** facts learned in a DM (`memories/<slug>/`) can surface in group answers, since the group defaults to `for_users=both`. No per-note `private` flag. |
@@ -1599,6 +1721,7 @@ Both people's raw messages are sent to the Anthropic API during extraction, so b
 | M7 | Web access (§7.5): web search + fetch server tools on the orchestrator call, `web.*` settings + dashboard toggles, persona rules, web-sourced memory → inbox only, usage/cost recording of searches & fetches, daily cap + budget-based disable, error fallback | "Is that new ramen place in Tanjong Pagar any good?" gets a short, cited answer; a web fact never lands in the vault without approval; tests pass offline with web tools faked. |
 | M8 | Google Maps links → places (§10.5): entity-based link detection incl. Telegram venue/location messages, `PlaceResolver` (allowlisted redirects, tolerant URL parser, cache), message annotation, `places` + vault place notes, `record_decision` tool + reaction, harvester support, import pre-resolution, named-business-only privacy rule, dashboard Places list. **Independent of M7**; can be built before it. | Pasting a Maps link with "eating here" in #Tykee gets a 👌 reaction (📍 isn't a bot reaction; `places.reaction`), "where are we eating?" answers with the shop name and link, and a link to someone's home is never stored. |
 | M9 | Place recommendations (§10.6): `areas` gazetteer seed (planning areas, subzones, MRT/LRT, aliases) + user neighbourhood areas, `find_places` / `save_place_candidates` / `set_place_attribute` tools, `place_attributes` with provenance (`user` vs `web`, TTL), pet-friendly must-have filter incl. `outdoor_only`, pets in `household.md`, code ranking + weighted random + explore slot, web discovery with search-URL map links, 🎲 more, dashboard Places/Recommendations settings. **No Google Places API.** Depends on M7 + M8. | "Brunch around Tiong Bahru, pet friendly" returns 3 picks with Map links and labelled pet-friendly sources; a user-confirmed attribute beats a web one; "near home" never uses an exact address. |
+| M10 | Read-only account reader (§10.7): Telethon `ReadOnlyTelegramReader` (allowlisted ops, `receive_updates=False`, per-call `reader_chats` check, tests enforcing all three), shell login with encrypted `StringSession`, **dashboard-managed chat allowlist** (add by username/id/link or 'Pick from my chats', step-up auth, bot DM alert, audit log, guard rails), per-chat consent/interval/retention, polling into `messages` (`source='account_reader'`), harvester integration (decision episodes → observed decisions, facts → inbox, safe topics), Disconnect kill switch, per-chat import Backfill. | Decisions agreed in the Jack ↔ Jocelyn DM appear in Tykee's decision log within ~30 min; adding/removing a readable chat works from the dashboard; Tykee never sends, reacts, marks read, or reads a chat that isn't allowlisted and consented; Disconnect removes the session from Telegram. |
 
 Deferred / later: voice notes (requires separate STT), photo input (fridge contents, works with Claude vision), weather context, WhatsApp import parser.
 
@@ -1622,6 +1745,7 @@ Deferred / later: voice notes (requires separate STT), photo input (fridge conte
 | Web access | Agent with Anthropic server-side web search/fetch, orchestrator only, capped, web-sourced memories need approval. Milestone M7, see §7.5. |
 | Import source | Telegram Desktop JSON export, uploaded via the dashboard Import wizard; chats chosen at upload time, see §15.1–15.2. |
 | Group behaviour | Group is primary; bot reads everything and decides when to speak, silent by default, see §10.2. |
+| Account reader | Tykee reads allowlisted chats (starting with the Jack ↔ Jocelyn DM) read-only as Jack (MTProto), records decisions and proposes memories; never posts as Jack; still replies only as the bot in the group. Allowlist managed in the dashboard; per-chat consent required. Milestone M10, see §10.7. |
 | Place recommendations | Recommendations around an area with must-haves like pet-friendly, from known places + web discovery, with attribute provenance. **No Google Places API.** Milestone M9, see §10.6. |
 | Google Maps links | Resolved in code (no API, no LLM) to a named place; recorded as a decision when you say you're going; only named businesses stored. Milestone M8, see §10.5. |
 | Group topics | Tykee reads and builds memory from **all** topics (except an optional ignore list) but only speaks in one **answer topic** (initially #Tykee), changeable from the dashboard. Enforced in code; milestone M4, see §10.4. |
