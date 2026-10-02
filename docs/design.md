@@ -82,7 +82,7 @@ A private Telegram bot that helps two people make everyday low-stakes decisions 
                     │        ▼                                                                    │                               │
                     │ Scheduler (APScheduler: nudges, backups, reconcile)                         │                               │
                     │                                                                             │                               │
- Browser (LAN) ◄───►│ Dashboard (FastAPI + Jinja2 + HTMX, :8080, password login)                  │                               │
+ Browser (LAN) ◄───►│ Dashboard (FastAPI + Jinja2 + HTMX, :8081, password login)                  │                               │
                     └─────────────────────────────────────────────────────────────────────────────┼───────────────────────────────┘
                                                                                                   ▼
                                                /data/bot.db  (SQLite: app state + FTS5 + sqlite-vec)    /data/vault/**/*.md (notes)
@@ -931,7 +931,7 @@ Conversation history for replies (§7.2) is per `(chat_id, answer topic)`: Tykee
 
 ## 11. Admin dashboard
 
-LAN-only at `http://<nas>:8080`. Single admin password (argon2 hash in env), signed session cookie, CSRF tokens on forms. Remote access, if ever needed, via Tailscale, never port-forwarding.
+LAN-only at `http://<nas>:8081` (host port 8081 maps to 8080 in the container; 8080 is taken on the NAS). Single admin password (argon2 hash in env), signed session cookie, CSRF tokens on forms. Remote access, if ever needed, via Tailscale, never port-forwarding.
 
 | Page | Contents |
 |---|---|
@@ -990,7 +990,7 @@ services:
     environment:
       - TZ=Asia/Singapore           # adjust
     ports:
-      - "8080:8080"                 # dashboard, LAN only
+      - "8081:8080"                 # dashboard, LAN only (8080 taken on the NAS)
     volumes:
       - /volume_nvme/tykee/data:/data        # bot.db, vault/, models cache, backups
     mem_limit: 1g
