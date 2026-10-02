@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **Status** | Draft v1.36 (Overview **Web searches today** tile: searches vs. `web.daily_search_cap` and the web gate's state, §7.5, §11). Earlier: v1.35 (a 400 on web tools pauses them for an hour and shows the API's reason on the dashboard, §7.5); v1.34 (reply escalation built: `/think` and phrases → Sonnet-tier, `/thinkharder` and "think even harder" → Opus-tier, §7.1); v1.33 (M10 as built: read-only account reader with resolve/log-out on the wrapper, first poll sets a starting point, immediate harvest after a poll, Backfill as a generated export into the import wizard, §10.7); v1.32 (share.google links resolve to places; `not_place` link status, §10.5) |
+| **Status** | Draft v1.37 (web search location without `country`: SG is rejected by the API; quieter logs, §7.5, §14). Earlier: v1.36 (Overview **Web searches today** tile: searches vs. `web.daily_search_cap` and the web gate's state, §7.5, §11); v1.35 (a 400 on web tools pauses them for an hour and shows the API's reason on the dashboard, §7.5); v1.34 (reply escalation built: `/think` and phrases → Sonnet-tier, `/thinkharder` and "think even harder" → Opus-tier, §7.1); v1.33 (M10 as built: read-only account reader with resolve/log-out on the wrapper, first poll sets a starting point, immediate harvest after a poll, Backfill as a generated export into the import wizard, §10.7); v1.32 (share.google links resolve to places; `not_place` link status, §10.5) |
 | **Name** | Tykee: phonetic spelling of Tyche, the Greek goddess of chance. Telegram handle e.g. `@TykeeBot` (must end in "bot") |
 | **Author** | Jack |
 | **Date** | 2026-10-01 |
@@ -610,7 +610,7 @@ Tykee can look things up online using the Claude API's built-in **web search** a
 | `web.fetch_max_uses` | 2 | Max page fetches per orchestrator call; 0 drops the fetch tool. |
 | `web.fetch_max_content_tokens` | 4000 | Truncates fetched pages (the tool's `max_content_tokens`), so one fetch can't cost 25k+ input tokens. |
 | `web.daily_search_cap` | 50 | Hard cap across both users; when hit, web tools are dropped from the tool list until midnight (user TZ). |
-| `web.user_location` | Singapore (city/country/timezone) | Localises search results. |
+| `web.user_location` | Singapore (city + timezone, no country) | Localises search results. Web search rejects some country codes, including `SG` ("Country code SG is not supported", a 400 on every request with web tools), so the seed leaves `country` out; migration 0013 drops `SG` from existing installs (v1.37). |
 | `web.allowed_domains` / `web.blocked_domains` | empty | Optional allow/block lists. |
 | `web.tool_versions` | `web_search_20250305`, `web_fetch_20250910` | Tool type strings, never hardcoded in code paths. The basic variants: every current model accepts them, including the Haiku-tier default (the dynamic-filtering `_20260209`+ variants need a 4.6+ Sonnet/Opus and run code execution). |
 | `pricing.web_search` | 0.01 | USD per search ($10 per 1,000, current pricing docs). Fetches cost tokens only. |
@@ -1505,7 +1505,7 @@ The vector/FTS index is in the DB backup, but can always be rebuilt from the vau
 
 ### 14.3 Observability
 
-- Structured JSON logs to stdout (Docker log rotation on).
+- Structured JSON logs to stdout (Docker log rotation on). Every-minute housekeeping stays out of INFO (v1.37): `apscheduler` and the HTTP client loggers (`httpx2`, the Anthropic SDK's) are at WARNING, and the harvest tick logs at INFO only when a topic is due. The `llm call` line already records each API call.
 - Dashboard health tiles: poller last-update time, Claude error rate (24h), index chunk count, DB size, last backup (M6). System shows when the scheduler last ticked.
 
 ### 14.4 Failure modes

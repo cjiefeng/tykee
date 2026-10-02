@@ -57,6 +57,7 @@
     {% set loc = s.web_user_location %}
     {% for f in ['city', 'region', 'country', 'timezone'] %}<div><label for="wl-{{ f }}">location {{ f }}</label><input id="wl-{{ f }}" type="text" name="web.user_location.{{ f }}" value="{{ (loc[f] if loc else None) or '' }}"></div>{% endfor %}
   </div>
+  <p class="help">Web search doesn't support every country code (SG is rejected, which turns web off for every reply); leave country blank and use city and timezone.</p>
   <div class="row">
     <div><label for="w-allow">web.allowed_domains (one per line)</label><textarea id="w-allow" name="web.allowed_domains">{{ s.web_allowed_domains | join('\n') }}</textarea></div>
     <div><label for="w-block">web.blocked_domains (one per line)</label><textarea id="w-block" name="web.blocked_domains">{{ s.web_blocked_domains | join('\n') }}</textarea></div>
