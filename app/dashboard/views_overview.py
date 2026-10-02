@@ -83,8 +83,11 @@ def register(router: APIRouter, deps: DashboardDeps) -> None:
 
     @router.post("/telegram/answer-topic")
     async def answer_topic(request: Request, thread_id: str = Form("")) -> Response:
-        new = int(thread_id) if thread_id.strip() else None
-        await deps.topics.set_answer_topic(new)
+        try:
+            new = int(thread_id) if thread_id.strip() else None
+            await deps.topics.set_answer_topic(new)
+        except ValueError as e:
+            return back(request, "/users", f"Not saved: {e}", "error")
         deps.health.topic_ok()
         group = deps.group_id()
         if new is not None and group is not None:
@@ -103,8 +106,14 @@ def register(router: APIRouter, deps: DashboardDeps) -> None:
     @router.post("/telegram/topics")
     async def topic_settings(request: Request) -> Response:
         form = await request.form()
-        ignored = sorted({int(v) for v in form.getlist("ignored") if isinstance(v, str)})
+        try:
+            ignored = sorted({int(v) for v in form.getlist("ignored") if isinstance(v, str)})
+        except ValueError:
+            return back(request, "/users", "Topic ids must be numbers.", "error")
         mode = str(form.get("off_topic_mention", "ignore"))
+        answer = (await deps.settings.load()).telegram_answer_topic_id
+        if answer is not None and answer in ignored:
+            return back(request, "/users", "The answer topic can't be ignored.", "error")
         try:
             await queries.save_settings(
                 deps.db,

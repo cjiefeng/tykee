@@ -247,3 +247,59 @@ async def test_deleted_answer_topic_raises_health_and_dms_admin_once(env: Env) -
     stack.gateway.fail_threads = set()
     await stack.adapter.handle_message(tg_message("/settopic", topic=OTHER), env.jack)
     assert stack.health.answer_topic_error is None
+
+
+async def test_closed_answer_topic_is_handled_like_a_deleted_one(env: Env) -> None:
+    await _answer_topic(env)
+    stack = make_stack(env, FakeLLMClient("one"))
+    stack.gateway.fail_threads = {ANSWER}
+    stack.gateway.fail_error = "Bad Request: TOPIC_CLOSED"
+    await _say(stack, env, "hi", ANSWER, at_bot=True)
+    assert stack.health.answer_topic_error is not None
+    assert [s.chat_id for s in stack.gateway.sent] == [JACK_TG]  # the admin DM
+
+
+async def test_callback_after_topic_moved_goes_to_new_topic_unquoted(env: Env) -> None:
+    await _answer_topic(env)
+    await seed_category(env, "dinner", [("Pho", [])])
+    stack = make_stack(env)
+    await stack.adapter.handle_message(tg_message("/pick dinner", topic=ANSWER), env.jack)
+    pick = stack.gateway.sent[-1]
+    did = (await env.db.read(lambda c: c.execute("SELECT id FROM decisions").fetchone()))[0]
+    await stack.topics.set_answer_topic(OTHER)  # moved while the buttons were still open
+    msg = tg_message("bot", from_id=BOT.id, message_id=pick.message_id, topic=ANSWER)
+    cb = CallbackQuery(
+        id="c",
+        from_user=tg_user(JACK_TG),
+        chat_instance="i",
+        data=callback_data(did, "accept"),
+        message=msg,
+    )
+    await stack.adapter.handle_callback(cb, env.jack)
+    last = stack.gateway.sent[-1]
+    assert (last.thread_id, last.reply_to) == (OTHER, None)
+
+
+async def test_moving_answer_topic_does_not_harvest_old_one(env: Env) -> None:
+    await _answer_topic(env)
+    stack = make_stack(env, FakeLLMClient(*["ok"] * 6))
+    for t in ["a", "b", "c", "d", "e", "f"]:
+        await _say(stack, env, t, ANSWER)
+    await stack.topics.set_answer_topic(OTHER)
+    newest = (await env.db.read(lambda c: c.execute("SELECT MAX(id) FROM messages").fetchone()))[0]
+    cursor = await env.db.read(
+        lambda c: c.execute(
+            "SELECT last_msg_id FROM topic_harvest WHERE chat_id = ? AND thread_id = ?",
+            (GROUP_ID, ANSWER),
+        ).fetchone()
+    )
+    assert cursor is not None and cursor[0] == newest
+
+
+async def test_ignored_topic_cant_be_answer_topic(env: Env) -> None:
+    import pytest
+
+    await env.db.write(lambda c: set_value(c, "telegram.ignored_topic_ids", [OTHER]))
+    stack = make_stack(env)
+    with pytest.raises(ValueError, match="ignored"):
+        await stack.topics.set_answer_topic(OTHER)

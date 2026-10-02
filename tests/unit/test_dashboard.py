@@ -461,3 +461,35 @@ async def test_conversation_shows_tool_calls(dash: Dash, env: Env) -> None:
     html = (await dash.client.get(f"/conversations/{GROUP_ID}")).text
     assert "list_options" in html and "@TykeeBot dinner?" in html and "Tykee</span>: ok" in html
     _ = set_value
+
+
+async def test_answer_topic_rejects_junk_and_ignored_topics(dash: Dash, env: Env) -> None:
+    await env.db.write(lambda c: set_value(c, "telegram.ignored_topic_ids", [9]))
+    await dash.login()
+    r = await dash.post("/telegram/answer-topic", {"thread_id": "abc"})
+    assert r.status_code == 303 and "Not saved" in await dash.flash("/users")
+    await dash.post("/telegram/answer-topic", {"thread_id": "9"})
+    assert "ignored" in await dash.flash("/users")
+    assert await env.db.read(lambda c: get_value(c, KEY_ANSWER)) is None
+    assert dash.stack.gateway.sent == []
+
+
+async def test_topic_settings_reject_junk_and_ignoring_the_answer_topic(
+    dash: Dash, env: Env
+) -> None:
+    await env.db.write(lambda c: set_value(c, KEY_ANSWER, 5))
+    await dash.login()
+    r = await dash.client.post("/telegram/topics", data={"csrf": dash.csrf, "ignored": ["x"]})
+    assert r.status_code == 303 and "must be numbers" in await dash.flash("/users")
+    await dash.client.post("/telegram/topics", data={"csrf": dash.csrf, "ignored": ["5"]})
+    assert "be ignored" in await dash.flash("/users")
+    assert (await env.settings.load()).telegram_ignored_topic_ids == []
+
+
+async def test_note_redirects_encode_the_path(dash: Dash) -> None:
+    await dash.login()
+    r = await dash.post(
+        "/memory/note", {"path": "memories/jack/咖啡", "text": "---\ntitle: Kopi\n---\nbody\n"}
+    )
+    assert r.headers["location"] == "/memory/note?path=memories/jack/%E5%92%96%E5%95%A1.md"
+    assert (await dash.client.get(r.headers["location"])).status_code == 200

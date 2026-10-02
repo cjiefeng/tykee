@@ -10,7 +10,13 @@ from zoneinfo import ZoneInfo
 
 from aiogram import F, Router
 from aiogram.exceptions import TelegramBadRequest
-from aiogram.types import CallbackQuery, Message, MessageReactionUpdated, ReactionTypeEmoji
+from aiogram.types import (
+    CallbackQuery,
+    InaccessibleMessage,
+    Message,
+    MessageReactionUpdated,
+    ReactionTypeEmoji,
+)
 
 from app.ambient.phrases import parse_duration
 from app.ambient.service import AmbientService
@@ -43,7 +49,7 @@ from app.telegram.keyboards import (
     parse_inbox_callback,
 )
 from app.telegram.middleware import GROUP_TYPES
-from app.telegram.topics import TopicService, send_thread, thread_of
+from app.telegram.topics import TopicService, is_topic_error, send_thread, thread_of
 
 log = logging.getLogger(__name__)
 
@@ -218,6 +224,20 @@ class TelegramAdapter:
         """The topic any group send without an incoming message goes to (§10.4)."""
         return await self._topics.answer_topic() if self._topics is not None else None
 
+    async def _callback_target(
+        self, msg: Message | InaccessibleMessage
+    ) -> tuple[int | None, int | None]:
+        """Where a follow-up to a decision button goes: the keyboard's own topic when it's still
+        the answer topic (as a reply), otherwise the current answer topic without quoting, since
+        Tykee never speaks outside it (§10.4)."""
+        if msg.chat.type not in GROUP_TYPES:
+            return None, msg.message_id
+        origin = thread_of(msg) if isinstance(msg, Message) else None
+        answer = await self._group_thread()
+        if answer is None or answer == origin:
+            return origin, msg.message_id
+        return answer, None
+
     async def _send(
         self,
         chat_id: int,
@@ -239,7 +259,7 @@ class TelegramAdapter:
                 thread_id=send_thread(thread),
             )
         except TelegramBadRequest as e:
-            if thread is None or "thread" not in e.message.lower():
+            if thread is None or not is_topic_error(e.message):
                 raise
             await self._answer_topic_broken(thread, e.message)
             return []
@@ -468,7 +488,12 @@ class TelegramAdapter:
         if before is None or before.status != "pending":
             await self._gateway.answer_callback(cb.id, "Already sorted 👍")
         else:
-            await self._memory.decide(item_id, approve=approve, user_id=actor.id)
+            try:
+                await self._memory.decide(item_id, approve=approve, user_id=actor.id)
+            except Exception:
+                # decide() put the item back to pending; keep the buttons so it can be retried.
+                await self._gateway.answer_callback(cb.id, "Couldn't apply that, try again 🤕")
+                return
             await self._gateway.answer_callback(cb.id, "Saved ✅" if approve else "Dropped ❌")
         await self._gateway.set_keyboard(cb.message.chat.id, cb.message.message_id, None)
 
@@ -519,7 +544,7 @@ class TelegramAdapter:
             return
         decision_id, action = parsed
         chat_id, message_id = cb.message.chat.id, cb.message.message_id
-        thread = await self._group_thread() if cb.message.chat.type in GROUP_TYPES else None
+        thread, reply_to = await self._callback_target(cb.message)
 
         fb = await self._decisions.feedback(decision_id, action, actor.id)
         remaining = await self._decisions.open_on_message(chat_id, message_id)
@@ -533,7 +558,7 @@ class TelegramAdapter:
             await self._gateway.answer_callback(cb.id, "Locked in ✅")
             await self._mirror_decision(decision_id, actor)
             await self._send(
-                chat_id, f"✅ **{fb.choice_text}** it is.", reply_to=message_id, thread=thread
+                chat_id, f"✅ **{fb.choice_text}** it is.", reply_to=reply_to, thread=thread
             )
         elif action == "reject":
             await self._gateway.answer_callback(cb.id, "Noted, I'll suggest that less 👌")
@@ -544,7 +569,7 @@ class TelegramAdapter:
                 await self._send(
                     chat_id,
                     "That's everything I've got for this one 🤷",
-                    reply_to=message_id,
+                    reply_to=reply_to,
                     thread=thread,
                 )
                 return
@@ -553,7 +578,7 @@ class TelegramAdapter:
             await self._send(
                 chat_id,
                 f"🎲 How about {bold_list([n for _, n in picks])}?",
-                reply_to=message_id,
+                reply_to=reply_to,
                 picks=picks,
                 thread=thread,
             )

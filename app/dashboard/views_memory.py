@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from urllib.parse import quote
+
 from fastapi import APIRouter, Form, Request
 from fastapi.responses import HTMLResponse, Response
 
@@ -10,6 +12,10 @@ from app.brain.notes import PathError
 from app.brain.store import NoteError
 from app.dashboard import queries
 from app.dashboard.core import DashboardDeps, back, render
+
+
+def _note_url(path: str) -> str:
+    return f"/memory/note?path={quote(path, safe='/')}"
 
 
 def register(router: APIRouter, deps: DashboardDeps) -> None:
@@ -39,7 +45,10 @@ def register(router: APIRouter, deps: DashboardDeps) -> None:
         text = abs_path.read_text(encoding="utf-8") if abs_path.is_file() else None
         if text is None:
             return back(request, "/memory", f"No note at {rel}.", "error")
-        parsed = nt.parse(text)
+        try:
+            parsed = nt.parse(text)
+        except Exception:  # broken frontmatter: still show the raw text so it can be fixed
+            parsed = None
         return render(request, deps, "note.html", path=rel, text=text, note=parsed)
 
     @router.post("/memory/note")
@@ -47,8 +56,8 @@ def register(router: APIRouter, deps: DashboardDeps) -> None:
         try:
             rel = await deps.store.write_raw(path, text)
         except (PathError, NoteError) as e:
-            return back(request, f"/memory/note?path={path}", str(e), "error")
-        return back(request, f"/memory/note?path={rel}", "Saved and reindexed.")
+            return back(request, _note_url(path), str(e), "error")
+        return back(request, _note_url(rel), "Saved and reindexed.")
 
     @router.post("/memory/note/pin")
     async def pin(request: Request, path: str = Form(...), pinned: str = Form("")) -> Response:
@@ -56,9 +65,7 @@ def register(router: APIRouter, deps: DashboardDeps) -> None:
             await deps.store.set_pinned(path, pinned == "on")
         except (PathError, NoteError) as e:
             return back(request, "/memory", str(e), "error")
-        return back(
-            request, f"/memory/note?path={path}", "Pinned." if pinned == "on" else "Unpinned."
-        )
+        return back(request, _note_url(path), "Pinned." if pinned == "on" else "Unpinned.")
 
     @router.post("/memory/note/delete")
     async def delete(request: Request, path: str = Form(...)) -> Response:

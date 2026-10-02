@@ -26,7 +26,7 @@ from app.brain.store import NoteStore
 from app.config import Env
 from app.dashboard.app import create_app
 from app.dashboard.core import DashboardDeps
-from app.dashboard.server import make_server
+from app.dashboard.server import make_server, serve
 from app.db.database import Database
 from app.db.migrate import apply_migrations
 from app.db.repos.users import UserRecord, load_enabled, upsert_allowlist
@@ -233,7 +233,7 @@ async def run(env: Env) -> None:
                 )
             )
             dashboard = make_server(dashboard_app, env.dashboard_host, env.dashboard_port)
-            dashboard_task = asyncio.create_task(dashboard.serve())
+            dashboard_task = asyncio.create_task(serve(dashboard))
             log.info("dashboard listening", extra={"port": env.dashboard_port})
         else:
             log.warning(

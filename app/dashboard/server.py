@@ -32,3 +32,14 @@ def make_server(app: FastAPI, host: str, port: int) -> uvicorn.Server:
         server_header=False,
     )
     return _EmbeddedServer(config)
+
+
+async def serve(server: uvicorn.Server) -> None:
+    """Run the dashboard without ever taking the bot down. uvicorn calls ``sys.exit`` when it
+    can't bind its port, which inside a task would end the whole process (Telegram included)."""
+    try:
+        await server.serve()
+    except SystemExit as e:
+        log.error("dashboard failed to start; the bot keeps running", extra={"code": e.code})
+    except Exception:
+        log.exception("dashboard crashed; the bot keeps running")

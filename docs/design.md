@@ -834,7 +834,7 @@ The group has **Topics** enabled. Tykee **reads and learns from every topic**, b
 | `models.harvest` | Haiku-tier | Model for stage 2 (falls back to `models.judge`). |
 | `budget.warn_ratio` | 0.8 | The 80% level: dashboard warning, and the harvester pauses. |
 
-**Changing the answer topic from the dashboard:** Users → Telegram shows a **dropdown of known topics** (name, message count, last activity) and the current answer topic. Selecting a new one takes effect immediately (settings are hot-reloaded); Tykee posts a one-line "I'll hang out here now 👋" in the new topic. `/settopic` sent by the admin inside a topic does the same from Telegram. Only the admin (first user in `ALLOWED_TELEGRAM_IDS`) can change it.
+**Changing the answer topic from the dashboard:** Users → Telegram shows a **dropdown of known topics** (name, message count, last activity) and the current answer topic. Selecting a new one takes effect immediately (settings are hot-reloaded); Tykee posts a one-line "I'll hang out here now 👋" in the new topic. `/settopic` sent by the admin inside a topic does the same from Telegram. Only the admin (first user in `ALLOWED_TELEGRAM_IDS`) can change it. An ignored topic can't be the answer topic (and the answer topic can't be ignored). The topic Tykee leaves was answered live, so its harvest cursor jumps to its newest message; only what's said there afterwards is harvested. Decision buttons pressed in the old topic get their follow-up in the new answer topic, unquoted.
 
 **Learning topic names:** a `forum_topics` table is filled from `forum_topic_created` / `forum_topic_edited` / `forum_topic_closed` / `forum_topic_reopened` service messages, and from the topic-creation message that topic messages reference via `reply_to_message` where Telegram includes it. Topics whose name is unknown are shown as "Topic <id>" until a name is seen; the admin can label them in the dashboard.
 
@@ -896,8 +896,10 @@ for each qualifying topic:
 
 **Implementation notes (M4):**
 - The scheduler fires every minute; the tick only does work once `harvest.interval_min` has passed, so changing the interval takes effect without a restart. The dashboard can force a tick.
-- No answer topic set → nothing is harvested (every topic is answered live then).
-- The cursor advances after each successfully applied window, so a failure (LLM down, invalid output, budget) is retried later without re-proposing what already landed. Each topic harvest writes a `harvest_runs` row (`done` / `error` / `budget`).
+- No answer topic set → nothing is harvested (every topic is answered live then). Ignored topics are never harvested, including rows stored before the topic was ignored.
+- One harvest runs at a time (the dashboard's "harvest now" waits for a scheduled run instead of racing it).
+- The cursor advances after each successfully applied window, so a failure (LLM down, invalid output, budget) is retried later without re-proposing what already landed. A window whose output is invalid 3 times in a row is skipped (cursor moves past it) so it can't cost money forever; API errors are always retried. The 80% budget check runs before every window, not just once per tick. Each topic harvest writes a `harvest_runs` row (`done` / `error` / `budget` / `skipped`), whose counts include windows applied before a failure.
+- Episode times: the transcript shows household-local times, so a time without an offset is read in `TZ`; a time after the window's last message falls back to that message's time.
 - Facts below confidence 0.6, and facts whose owner isn't a user slug or `shared` (third parties), are dropped. A fact lands in `memories/<owner>/{preferences|places|facts|constraints}.md` (or `shared/topics/…`) once approved.
 - Chosen episodes whose category phrase (or any phrase seen) resolves by alias/slug become `decisions(source='observed', status='accepted')`, matched to an existing option by name. Unknown categories become **inbox suggestions** (`kind='category'`; approving creates the category with those phrasings as aliases). New options with non-negative sentiment in known categories become `kind='option'` suggestions (approving adds the option). Suggestions show in `/inbox` and the dashboard inbox.
 
@@ -936,7 +938,7 @@ CREATE TABLE harvest_runs (               -- one row per LLM harvest, for the da
   from_msg_id INTEGER NOT NULL, to_msg_id INTEGER NOT NULL, messages INTEGER NOT NULL,
   facts INTEGER NOT NULL DEFAULT 0, decisions INTEGER NOT NULL DEFAULT 0,
   suggestions INTEGER NOT NULL DEFAULT 0, skipped_out_of_scope INTEGER NOT NULL DEFAULT 0,
-  status TEXT NOT NULL,                   -- 'done' | 'error' | 'budget'
+  status TEXT NOT NULL,                   -- 'done' | 'error' | 'budget' | 'skipped'
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 ```
@@ -945,7 +947,7 @@ Conversation history for replies (§7.2) is per `(chat_id, answer topic)`: Tykee
 
 #### Edge cases
 
-- **Answer topic deleted/closed:** a send failing with a thread error raises a red health tile and DMs the admin (at most once an hour) to pick a new topic in the dashboard or via `/settopic`, which clears the tile. Reading/harvesting continues.
+- **Answer topic deleted/closed:** a send failing with a thread or topic error ("message thread not found", `TOPIC_CLOSED`) raises a red health tile and DMs the admin (at most once an hour) to pick a new topic in the dashboard or via `/settopic`, which clears the tile. Reading/harvesting continues.
 - **Topics disabled for the group:** `message_thread_id` disappears, so everything lands in General (`thread_id = 1`). The health tile warns when the answer topic has been silent for 24 h while the group is active.
 - **Group → supergroup migration:** topic ids are kept; only the chat id changes (§10).
 

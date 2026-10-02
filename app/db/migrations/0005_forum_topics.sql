@@ -32,7 +32,7 @@ CREATE TABLE harvest_runs (
   decisions     INTEGER NOT NULL DEFAULT 0,          -- recorded as source='observed'
   suggestions   INTEGER NOT NULL DEFAULT 0,          -- unknown categories / options → inbox
   skipped_out_of_scope INTEGER NOT NULL DEFAULT 0,
-  status        TEXT NOT NULL,                       -- 'done' | 'error' | 'budget'
+  status        TEXT NOT NULL,                       -- 'done' | 'error' | 'budget' | 'skipped'
   created_at    TEXT NOT NULL DEFAULT (datetime('now'))
 );
 -- usage.purpose gains 'harvest'; decisions.source gains 'observed' (no schema change needed)

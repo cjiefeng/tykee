@@ -348,3 +348,116 @@ async def test_inbox_command_shows_suggestions(env: Env) -> None:
     )
     await stack.adapter.handle_message(tg_message("/inbox", topic=ANSWER, forum=True), env.jack)
     assert stack.gateway.sent[-1].text.startswith("➕ **Suggestion:** New dinner option: X")  # noqa: RUF001
+
+
+# --- review fixes ------------------------------------------------------------------------------
+
+
+async def _stamp_each(env: Env, *whens: str) -> None:
+    def _up(c: sqlite3.Connection) -> None:
+        ids = [r[0] for r in c.execute("SELECT id FROM messages ORDER BY id")]
+        for i, when in zip(ids, whens, strict=True):
+            c.execute("UPDATE messages SET created_at = ? WHERE id = ?", (when, i))
+
+    await env.db.write(_up)
+
+
+async def test_ignored_topic_is_never_harvested_even_if_stored_before(env: Env) -> None:
+    stack, h = await setup(env, extraction())
+    await chat(stack, env, FOOD, *["private stuff"] * 6)
+    await env.db.write(lambda c: set_value(c, "telegram.ignored_topic_ids", [FOOD]))
+    assert await h.tick(force=True) == [] and stack.llm.requests == []
+
+
+async def test_naive_episode_time_is_household_local(env: Env) -> None:
+    await seed_category(env, "dinner", [("Pho", [])])
+    stack, h = await setup(
+        env,
+        extraction(
+            episodes=[
+                episode("dinner", "pho", ts="2026-10-02T19:30"),  # SGT, no offset
+                episode("dinner", "pho", ts="2030-01-01T12:00:00+08:00"),  # after the chat: bogus
+            ]
+        ),
+    )
+    await chat(stack, env, FOOD, *["ok pho"] * 6)
+    await _stamp(env, "2026-10-02 13:00:00")  # 21:00 SGT
+    await h.tick(force=True)
+    rows = await env.db.read(
+        lambda c: c.execute(
+            "SELECT created_at FROM decisions WHERE source = 'observed' ORDER BY id"
+        ).fetchall()
+    )
+    assert [r[0] for r in rows] == ["2026-10-02 11:30:00", "2026-10-02 13:00:00"]
+
+
+async def test_concurrent_ticks_harvest_once(env: Env) -> None:
+    import asyncio
+
+    stack, h = await setup(
+        env,
+        extraction(facts=[fact("partner", "Likes laksa.")]),
+        extraction(facts=[fact("partner", "Likes laksa.")]),
+    )
+    await chat(stack, env, FOOD, *["laksa"] * 6)
+    complete = stack.llm.complete
+
+    async def slow(req: Any) -> Any:
+        await asyncio.sleep(0.02)
+        return await complete(req)
+
+    stack.llm.complete = slow  # type: ignore[method-assign]
+    await asyncio.gather(h.tick(force=True), h.tick(force=True))  # scheduler + "harvest now"
+    assert len(stack.llm.requests) == 1
+    assert [i.content for i in await stack.memory.pending()] == ["Likes laksa."]
+
+
+async def test_failure_after_a_window_keeps_its_counts(env: Env) -> None:
+    stack, h = await setup(
+        env, extraction(facts=[fact("partner", "Likes laksa.")]), LLMUnavailable("down")
+    )
+    await chat(stack, env, FOOD, *["laksa"] * 6)
+    # Two windows: a > 2 h gap after the third message.
+    early, late = "2026-10-02 01:00:00", "2026-10-02 05:00:00"
+    await _stamp_each(env, early, early, early, late, late, late)
+    [result] = await h.tick(force=True)
+    assert (result.status, result.facts) == ("error", 1)
+    run = (await runs(env))[0]
+    assert (run["status"], run["facts"]) == ("error", 1)
+
+
+async def test_window_with_repeatedly_invalid_output_is_skipped(env: Env) -> None:
+    stack, h = await setup(env, "not json", "[]", "nope", extraction())
+    await chat(stack, env, FOOD, *["laksa"] * 6)
+    assert [r.status for r in await h.tick(force=True)] == ["error"]
+    assert [r.status for r in await h.tick(force=True)] == ["error"]
+    assert [r.status for r in await h.tick(force=True)] == ["skipped"]
+    assert await h.tick(force=True) == []  # cursor moved past it; no 4th call
+    assert len(stack.llm.requests) == 3
+
+
+async def test_api_errors_are_never_skipped(env: Env) -> None:
+    stack, h = await setup(env, *[LLMUnavailable("down")] * 4)
+    await chat(stack, env, FOOD, *["laksa"] * 6)
+    for _ in range(4):
+        assert [r.status for r in await h.tick(force=True)] == ["error"]
+
+
+async def test_budget_checked_between_windows(env: Env) -> None:
+    await env.db.write(lambda c: set_value(c, "budget.daily_usd", 1.0))
+    stack, h = await setup(env, extraction(facts=[fact("partner", "Likes laksa.")]))
+    complete = stack.llm.complete
+
+    async def costly(req: Any) -> Any:
+        row = usage_repo.UsageRow(
+            None, "harvest", GROUP_ID, None, "m", 1, 1, 0, 0, 0.9, to_sql(stack.clock())
+        )
+        await env.db.write(lambda c: usage_repo.insert(c, row))
+        return await complete(req)
+
+    stack.llm.complete = costly  # type: ignore[method-assign]
+    await chat(stack, env, FOOD, *["laksa"] * 6)
+    early, late = "2026-10-02 01:00:00", "2026-10-02 05:00:00"
+    await _stamp_each(env, early, early, early, late, late, late)
+    [result] = await h.tick(force=True)
+    assert (result.status, result.facts, len(stack.llm.requests)) == ("budget", 1, 1)

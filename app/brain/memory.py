@@ -277,7 +277,10 @@ class MemoryService:
         return int(row[0])
 
     async def decide(self, item_id: int, *, approve: bool, user_id: int | None) -> InboxItem:
-        """Approve (append to the target note) or reject. Only a pending item can change."""
+        """Approve (append to the target note, or apply the suggestion) or reject. Only a pending
+        item can change. The status flips first, so two approvals racing (Telegram button and
+        dashboard) apply it once; if applying fails, the item goes back to pending and the error
+        propagates, so nothing is silently lost."""
         now = to_sql(self._clock())
         status = "approved" if approve else "rejected"
         changed = await self._db.write(
@@ -292,23 +295,38 @@ class MemoryService:
         item = await self.get(item_id)
         if item is None:
             raise MemoryPolicyError(f"no inbox item {item_id}")
-        if changed and approve and item.kind != "note":
+        if not (changed and approve):
+            return item
+        try:
+            await self._apply(item)
+        except Exception:
+            log.exception("applying inbox item failed", extra={"inbox_id": item.id})
+            await self._db.write(
+                lambda c: c.execute(
+                    "UPDATE memory_inbox SET status = 'pending', decided_at = NULL, "
+                    "decided_by = NULL WHERE id = ?",
+                    (item_id,),
+                )
+            )
+            raise
+        return item
+
+    async def _apply(self, item: InboxItem) -> None:
+        if item.kind != "note":
             applier = self.appliers.get(item.kind)
             if applier is None:
-                log.warning("no applier for inbox kind", extra={"kind": item.kind})
-            else:
-                await applier(item)
-        elif changed and approve:
-            exists = await self.store.exists(item.target_path)
-            topic = item.target_path.rsplit("/", 1)[-1][:-3].replace("-", " ")
-            await self.store.write(
-                item.target_path,
-                mode="append" if exists else "create",
-                content=f"- {item.content}",
-                title=topic[:1].upper() + topic[1:],
-                source=item.source or f"inbox:{item.id}",
-            )
-        return item
+                raise MemoryPolicyError(f"don't know how to apply a {item.kind!r} suggestion")
+            await applier(item)
+            return
+        exists = await self.store.exists(item.target_path)
+        topic = item.target_path.rsplit("/", 1)[-1][:-3].replace("-", " ")
+        await self.store.write(
+            item.target_path,
+            mode="append" if exists else "create",
+            content=f"- {item.content}",
+            title=topic[:1].upper() + topic[1:],
+            source=item.source or f"inbox:{item.id}",
+        )
 
     # --- decision log (§8.4) -----------------------------------------------------------------
 

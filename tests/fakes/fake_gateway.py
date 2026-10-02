@@ -26,6 +26,7 @@ class FakeGateway:
     keyboards: dict[int, Keyboard | None] = field(default_factory=dict)  # message_id → current
     toasts: list[str] = field(default_factory=list)
     fail_threads: set[int] = field(default_factory=set)  # sends into these threads raise
+    fail_error: str = "Bad Request: message thread not found"  # or "Bad Request: TOPIC_CLOSED"
     _next_id: int = 1000
 
     async def send_text(
@@ -40,9 +41,7 @@ class FakeGateway:
             from aiogram.exceptions import TelegramBadRequest
             from aiogram.methods import SendMessage
 
-            raise TelegramBadRequest(
-                SendMessage(chat_id=chat_id, text=text), "Bad Request: message thread not found"
-            )
+            raise TelegramBadRequest(SendMessage(chat_id=chat_id, text=text), self.fail_error)
         self._next_id += 1
         self.sent.append(
             Sent(

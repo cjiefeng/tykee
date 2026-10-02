@@ -37,6 +37,13 @@ def thread_of(msg: Message) -> int | None:
     return GENERAL_THREAD if msg.chat.is_forum else None
 
 
+def is_topic_error(message: str) -> bool:
+    """Telegram's error when sending into a deleted ("message thread not found") or closed
+    ("TOPIC_CLOSED") topic."""
+    lowered = message.lower()
+    return "thread" in lowered or "topic" in lowered
+
+
 def send_thread(thread_id: int | None) -> int | None:
     """What to pass as ``message_thread_id`` when sending into ``thread_id``."""
     return None if thread_id in (None, GENERAL_THREAD) else thread_id
@@ -109,7 +116,26 @@ class TopicService:
         return True
 
     async def set_answer_topic(self, thread_id: int | None) -> None:
-        await self._db.write(lambda c: set_value(c, KEY_ANSWER, thread_id))
+        """Move Tykee. The old answer topic was answered live, so its harvest cursor jumps to
+        its newest message: the harvester only picks up what's said there from now on."""
+        s = await self._settings.load()
+        if thread_id is not None and thread_id in s.telegram_ignored_topic_ids:
+            raise ValueError("that topic is ignored; un-ignore it first")
+        old, group = s.telegram_answer_topic_id, self._group_id()
+
+        def _set(c: sqlite3.Connection) -> None:
+            set_value(c, KEY_ANSWER, thread_id)
+            if old is None or old == thread_id or group is None:
+                return
+            c.execute(
+                "INSERT INTO topic_harvest(chat_id, thread_id, last_msg_id) "
+                "SELECT ?, ?, COALESCE(MAX(id), 0) FROM messages WHERE chat_id = ? "
+                "AND thread_id = ? ON CONFLICT(chat_id, thread_id) DO UPDATE SET "
+                "last_msg_id = MAX(topic_harvest.last_msg_id, excluded.last_msg_id)",
+                (group, old, group, old),
+            )
+
+        await self._db.write(_set)
         log.info("answer topic set", extra={"thread_id": thread_id})
 
     # --- topic names -------------------------------------------------------------------------

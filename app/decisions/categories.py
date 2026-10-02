@@ -199,10 +199,18 @@ def merge(conn: sqlite3.Connection, src_id: int, dst_id: int) -> None:
     Options with the same name are folded into the destination's option."""
     if src_id == dst_id:
         raise ValueError("can't merge a category into itself")
-    src = conn.execute("SELECT slug FROM categories WHERE id = ?", (src_id,)).fetchone()
+    src = conn.execute(
+        "SELECT slug, merged_into FROM categories WHERE id = ?", (src_id,)
+    ).fetchone()
     dst = get_by_id(conn, dst_id)
     if src is None or dst is None:
         raise ValueError("unknown category")
+    if src["merged_into"] is not None:
+        raise ValueError("that category was already merged into another one")
+    # ``dst`` follows merged_into, so it can resolve back to ``src`` (e.g. a stale page merging
+    # A into B after B was merged into A). Merging into itself would delete every option.
+    if dst.id == src_id:
+        raise ValueError("can't merge a category into itself")
     dst_opts = {
         r["name"].casefold(): r["id"]
         for r in conn.execute("SELECT id, name FROM options WHERE category_id = ?", (dst.id,))
