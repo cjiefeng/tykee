@@ -25,6 +25,7 @@ All tooling runs inside Docker (no local Python/uv needed).
 | Migrate `./data/bot.db` manually | `make migrate` (also runs automatically on startup) |
 | Build amd64 image | `make build` |
 | Run locally | `cp .env.example .env`, fill in, `make up`; `make logs`; `make down` |
+| Deploy (NAS, no make needed) | `./deploy.sh` (latest of current branch) or `./deploy.sh <branch>` to test a PR branch |
 
 ## Layout
 
