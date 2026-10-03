@@ -263,7 +263,8 @@ loop, and update `docs/design.md` in the same commit as any behaviour change.
 | M9 ✅ | Place recommendations: "brunch around Tiong Bahru, pet friendly" picks from known places plus web discovery, with must-have filters and a source for each attribute (you confirmed vs. per website) |
 | M10 ✅ | Read-only account reader: learns decisions and preferences from chats the bot isn't in (starting with the Jack ↔ partner DM) via Jack's account. Strictly read-only; which chats it may read is picked in the dashboard, each with its own consent; one-click Disconnect |
 
-Details and acceptance criteria are in design §16.
+All planned milestones are built. Details and acceptance criteria are in design §16, which also
+lists what's deferred (voice notes, photo input, weather context, WhatsApp import).
 
 ## Privacy
 

@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **Status** | Draft v1.39 (§16 marks M1–M10 as built). Earlier: v1.38 (replies that need the web run on Sonnet-tier: `web.tier` and the `look_up_web` handoff, §7.1, §7.5). Earlier: v1.37 (web search location without `country`: SG is rejected by the API; quieter logs, §7.5, §14). Earlier: v1.36 (Overview **Web searches today** tile: searches vs. `web.daily_search_cap` and the web gate's state, §7.5, §11); v1.35 (a 400 on web tools pauses them for an hour and shows the API's reason on the dashboard, §7.5); v1.34 (reply escalation built: `/think` and phrases → Sonnet-tier, `/thinkharder` and "think even harder" → Opus-tier, §7.1); v1.33 (M10 as built: read-only account reader with resolve/log-out on the wrapper, first poll sets a starting point, immediate harvest after a poll, Backfill as a generated export into the import wizard, §10.7); v1.32 (share.google links resolve to places; `not_place` link status, §10.5) |
+| **Status** | Draft v1.39 (§16 marks M1–M10 as built; §10.6 lists the other must-have attributes as built, not future). Earlier: v1.38 (replies that need the web run on Sonnet-tier: `web.tier` and the `look_up_web` handoff, §7.1, §7.5). Earlier: v1.37 (web search location without `country`: SG is rejected by the API; quieter logs, §7.5, §14). Earlier: v1.36 (Overview **Web searches today** tile: searches vs. `web.daily_search_cap` and the web gate's state, §7.5, §11); v1.35 (a 400 on web tools pauses them for an hour and shows the API's reason on the dashboard, §7.5); v1.34 (reply escalation built: `/think` and phrases → Sonnet-tier, `/thinkharder` and "think even harder" → Opus-tier, §7.1); v1.33 (M10 as built: read-only account reader with resolve/log-out on the wrapper, first poll sets a starting point, immediate harvest after a poll, Backfill as a generated export into the import wizard, §10.7); v1.32 (share.google links resolve to places; `not_place` link status, §10.5) |
 | **Name** | Tykee: phonetic spelling of Tyche, the Greek goddess of chance. Telegram handle e.g. `@TykeeBot` (must end in "bot") |
 | **Author** | Jack |
 | **Date** | 2026-10-01 |
@@ -1127,7 +1127,7 @@ Ask Tykee for recommendations around a place, optionally with must-haves:
 
 #### 2. Place attributes with provenance
 
-Pet-friendliness (and future attributes like `kid_friendly`, `halal`, `aircon`, `quiet`) live in a provenance-tracked table, not in free text:
+Pet-friendliness and the other must-haves (`kid_friendly`, `halal`, `aircon`, `quiet`, yes/no/unknown) live in a provenance-tracked table, not in free text:
 
 | Value (`pet_friendly`) | Meaning |
 |---|---|
