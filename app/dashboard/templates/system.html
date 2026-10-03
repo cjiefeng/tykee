@@ -30,6 +30,7 @@
 {% for b in backups %}<tr><td>{{ b.name }}</td><td>{{ (b.size / 1048576) | round(2) }} MB</td><td class="muted small">{{ local(b.modified) }}</td><td><a href="/system/backups/{{ b.name }}" download>Download</a></td></tr>
 {% else %}<tr><td colspan="4">No backups yet.</td></tr>{% endfor %}
 </table></div>
-<h2>Logs <span class="muted small">(last 200 lines, live)</span></h2>
-<div hx-get="/system/logs" hx-trigger="every 5s" hx-swap="innerHTML">{% include "_logs.html" %}</div>
+<h2>Logs <span class="muted small">(last 500 lines, live)</span></h2>
+{# Swap only the text inside the <pre> so it keeps its scroll position across refreshes. #}
+<pre class="logs" hx-get="/system/logs" hx-trigger="every 5s" hx-swap="innerHTML">{% include "_logs.html" %}</pre>
 {% endblock %}
