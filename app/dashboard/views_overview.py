@@ -151,14 +151,14 @@ def register(router: APIRouter, deps: DashboardDeps) -> None:
             vault=deps.store.root,
             embed_model=deps.embed_model,
             health=deps.health,
-            logs=deps.log_lines()[-200:],
+            logs=deps.log_lines()[-500:],
             s=s,
             **views_ops.backup_context(deps),
         )
 
     @router.get("/system/logs", response_class=HTMLResponse)
     async def logs(request: Request) -> Response:
-        return render(request, deps, "_logs.html", logs=deps.log_lines()[-200:])
+        return render(request, deps, "_logs.html", logs=deps.log_lines()[-500:])
 
     @router.post("/system/reindex")
     async def reindex(request: Request) -> Response:

@@ -30,6 +30,20 @@
 {% for b in backups %}<tr><td>{{ b.name }}</td><td>{{ (b.size / 1048576) | round(2) }} MB</td><td class="muted small">{{ local(b.modified) }}</td><td><a href="/system/backups/{{ b.name }}" download>Download</a></td></tr>
 {% else %}<tr><td colspan="4">No backups yet.</td></tr>{% endfor %}
 </table></div>
-<h2>Logs <span class="muted small">(last 200 lines, live)</span></h2>
-<div hx-get="/system/logs" hx-trigger="every 5s" hx-swap="innerHTML">{% include "_logs.html" %}</div>
+<h2>Logs <span class="muted small">(last 500 lines, live)</span></h2>
+<label class="check"><input type="checkbox" id="logs-follow" checked autocomplete="off"> Stick to the newest line</label>
+{# Swap only the text inside the <pre> so it keeps its scroll position across refreshes. #}
+<pre class="logs" id="logs" hx-get="/system/logs" hx-trigger="every 5s" hx-swap="innerHTML">{% include "_logs.html" %}</pre>
+<script>
+  // Checked: jump to the newest line on load, on every refresh and when ticked. Unchecked: stay put.
+  // autocomplete="off" stops the browser restoring an unticked box, so each visit starts following.
+  (() => {
+    const pre = document.getElementById('logs');
+    const follow = document.getElementById('logs-follow');
+    const toBottom = () => { if (follow.checked) pre.scrollTop = pre.scrollHeight; };
+    toBottom();
+    follow.addEventListener('change', toBottom);
+    pre.addEventListener('htmx:afterSwap', toBottom);
+  })();
+</script>
 {% endblock %}
