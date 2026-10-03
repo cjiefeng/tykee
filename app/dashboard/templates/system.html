@@ -31,17 +31,19 @@
 {% else %}<tr><td colspan="4">No backups yet.</td></tr>{% endfor %}
 </table></div>
 <h2>Logs <span class="muted small">(last 500 lines, live)</span></h2>
+<label class="check"><input type="checkbox" id="logs-follow" checked autocomplete="off"> Stick to the newest line</label>
 {# Swap only the text inside the <pre> so it keeps its scroll position across refreshes. #}
 <pre class="logs" id="logs" hx-get="/system/logs" hx-trigger="every 5s" hx-swap="innerHTML">{% include "_logs.html" %}</pre>
 <script>
-  // Follow the newest line while the reader is at the bottom; leave them alone once they scroll up.
+  // Checked: jump to the newest line on load, on every refresh and when ticked. Unchecked: stay put.
+  // autocomplete="off" stops the browser restoring an unticked box, so each visit starts following.
   (() => {
     const pre = document.getElementById('logs');
-    const atBottom = () => pre.scrollHeight - pre.scrollTop - pre.clientHeight < 8;
-    let follow = true;
-    pre.scrollTop = pre.scrollHeight;
-    pre.addEventListener('htmx:beforeSwap', () => { follow = atBottom(); });
-    pre.addEventListener('htmx:afterSwap', () => { if (follow) pre.scrollTop = pre.scrollHeight; });
+    const follow = document.getElementById('logs-follow');
+    const toBottom = () => { if (follow.checked) pre.scrollTop = pre.scrollHeight; };
+    toBottom();
+    follow.addEventListener('change', toBottom);
+    pre.addEventListener('htmx:afterSwap', toBottom);
   })();
 </script>
 {% endblock %}
