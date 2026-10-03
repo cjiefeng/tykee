@@ -32,5 +32,16 @@
 </table></div>
 <h2>Logs <span class="muted small">(last 500 lines, live)</span></h2>
 {# Swap only the text inside the <pre> so it keeps its scroll position across refreshes. #}
-<pre class="logs" hx-get="/system/logs" hx-trigger="every 5s" hx-swap="innerHTML">{% include "_logs.html" %}</pre>
+<pre class="logs" id="logs" hx-get="/system/logs" hx-trigger="every 5s" hx-swap="innerHTML">{% include "_logs.html" %}</pre>
+<script>
+  // Follow the newest line while the reader is at the bottom; leave them alone once they scroll up.
+  (() => {
+    const pre = document.getElementById('logs');
+    const atBottom = () => pre.scrollHeight - pre.scrollTop - pre.clientHeight < 8;
+    let follow = true;
+    pre.scrollTop = pre.scrollHeight;
+    pre.addEventListener('htmx:beforeSwap', () => { follow = atBottom(); });
+    pre.addEventListener('htmx:afterSwap', () => { if (follow) pre.scrollTop = pre.scrollHeight; });
+  })();
+</script>
 {% endblock %}
