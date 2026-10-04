@@ -213,6 +213,10 @@ class AmbientService:
         log.info("ambient muted", extra={"chat_id": chat_id, "until": until.isoformat()})
         return until
 
+    async def is_muted(self, chat_id: int) -> bool:
+        st = await self._db.read(lambda c: state_repo.load(c, chat_id, self._today()))
+        return st.muted_until is not None and self._clock() < st.muted_until
+
     async def unmute(self, chat_id: int) -> None:
         await self._db.write(lambda c: state_repo.set_mute(c, chat_id, None))
 

@@ -38,6 +38,11 @@
   <option value="ignore" {{ 'selected' if s.telegram_off_topic_mention == 'ignore' }}>ignore (most private)</option>
   <option value="redirect" {{ 'selected' if s.telegram_off_topic_mention == 'redirect' }}>redirect: "Ask me in #Tykee 👋", once a day per topic</option>
 </select>
+<label for="answermode">In the answer topic</label>
+<select id="answermode" form="topics" name="answer_topic_mode" style="max-width:420px">
+  <option value="addressed" {{ 'selected' if s.telegram_answer_topic_mode == 'addressed' }}>reply to every message (not stickers or emoji; General still needs a mention)</option>
+  <option value="ambient" {{ 'selected' if s.telegram_answer_topic_mode == 'ambient' }}>only when mentioned, or when the judge decides to step in</option>
+</select>
 <div class="actions"><button form="topics" class="primary">Save topic settings</button></div>
 {% endif %}
 {% endblock %}

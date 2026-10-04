@@ -68,6 +68,8 @@ def episode(phrase: str, choice: str, outcome: str = "chosen", **kw: Any) -> dic
 
 async def setup(env: Env, *replies: Any) -> tuple[Stack, Harvester]:
     await env.db.write(lambda c: set_value(c, KEY_ANSWER, ANSWER))
+    # Answer-topic chat must not call Claude here: these tests count harvest requests.
+    await env.db.write(lambda c: set_value(c, "telegram.answer_topic_mode", "ambient"))
     stack = make_stack(env, FakeLLMClient(*replies))
     inbox_appliers.register(stack.memory, stack.decisions)
     h = Harvester(

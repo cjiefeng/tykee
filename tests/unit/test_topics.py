@@ -7,6 +7,7 @@ from typing import Any
 
 from aiogram.types import CallbackQuery, ForumTopicClosed, ForumTopicCreated, ForumTopicEdited
 
+from app.llm.client import LLMUnavailable
 from app.settings import set_value
 from app.telegram.keyboards import callback_data
 from app.telegram.topics import GENERAL_THREAD, KEY_ANSWER, send_thread, thread_of
@@ -148,14 +149,14 @@ async def test_off_topic_redirect_once_per_day(env: Env) -> None:
 
 async def test_answer_topic_reply_and_history_are_topic_only(env: Env) -> None:
     await _answer_topic(env)
-    llm = FakeLLMClient("Pho.")
+    llm = FakeLLMClient("Hi.", "Pho.")
     stack = make_stack(env, llm)
     await _say(stack, env, "secret elsewhere", OTHER)
     await _say(stack, env, "earlier here", ANSWER, from_id=PARTNER_TG)
     await _say(stack, env, "dinner?", ANSWER, at_bot=True)
     sent = stack.gateway.sent[-1]
     assert (sent.text, sent.thread_id) == ("Pho.", ANSWER)
-    history = json.dumps(list(llm.requests[0].messages))
+    history = json.dumps(list(llm.requests[-1].messages))
     assert "earlier here" in history and "secret elsewhere" not in history
     last = (await _rows(env))[-1]
     assert (last["role"], last["thread_id"]) == ("assistant", ANSWER)
@@ -171,6 +172,7 @@ async def test_general_as_answer_topic_sends_without_thread_id(env: Env) -> None
 
 async def test_ambient_only_listens_and_speaks_in_answer_topic(env: Env) -> None:
     await _answer_topic(env)
+    await env.db.write(lambda c: set_value(c, "telegram.answer_topic_mode", "ambient"))
     verdict = json.dumps({"action": "respond", "reason": "stuck", "confidence": 0.9})
     llm = FakeLLMClient(verdict, "Laksa!")
     stack = make_stack(env, llm)
@@ -181,6 +183,76 @@ async def test_ambient_only_listens_and_speaks_in_answer_topic(env: Env) -> None
     judged = str(next(iter(llm.requests[0].messages))["content"])
     assert judged.count("idk you decide") == 1  # the off-topic copy isn't in the judge window
     assert (stack.gateway.sent[-1].text, stack.gateway.sent[-1].thread_id) == ("Laksa!", ANSWER)
+
+
+# --- Tykee's own topic (answer_topic_mode = addressed) -------------------------------------------
+
+
+async def test_own_topic_answers_without_mention_unquoted(env: Env) -> None:
+    await _answer_topic(env)
+    stack = make_stack(env, FakeLLMClient("Chicken rice."))
+    await _say(stack, env, "what should we eat", ANSWER)
+    sent = stack.gateway.sent[-1]
+    assert (sent.text, sent.thread_id, sent.reply_to) == ("Chicken rice.", ANSWER, None)
+    assert not stack.ambient._debouncer.pending(GROUP_ID)
+
+
+async def test_own_topic_mention_is_still_quoted(env: Env) -> None:
+    await _answer_topic(env)
+    stack = make_stack(env, FakeLLMClient("Ramen."))
+    await _say(stack, env, "dinner?", ANSWER, at_bot=True)
+    assert stack.gateway.sent[-1].reply_to is not None
+
+
+async def test_own_topic_skips_stickers_and_emoji(env: Env) -> None:
+    await _answer_topic(env)
+    stack = make_stack(env)
+    await _say(stack, env, "😂👍", ANSWER)
+    sticker = tg_message(
+        None,
+        topic=ANSWER,
+        sticker={
+            "file_id": "s",
+            "file_unique_id": "s",
+            "type": "regular",
+            "width": 1,
+            "height": 1,
+            "is_animated": False,
+            "is_video": False,
+        },
+    )
+    await stack.adapter.handle_message(sticker, env.jack)
+    assert stack.gateway.sent == [] and stack.llm.requests == []
+
+
+async def test_own_topic_respects_mute_but_mentions_get_through(env: Env) -> None:
+    await _answer_topic(env)
+    stack = make_stack(env, FakeLLMClient("Sure."))
+    await stack.ambient.mute(GROUP_ID)
+    await _say(stack, env, "what should we eat", ANSWER)
+    assert stack.gateway.sent == [] and stack.llm.requests == []
+    await _say(stack, env, "ok what should we eat", ANSWER, at_bot=True)
+    assert stack.gateway.sent[-1].text == "Sure."
+
+
+async def test_own_topic_offline_fallback_only_for_explicit_asks(env: Env) -> None:
+    await _answer_topic(env)
+    stack = make_stack(env, FakeLLMClient(LLMUnavailable("down"), LLMUnavailable("down")))
+    await _say(stack, env, "see you later", ANSWER)
+    assert stack.gateway.sent == []
+    await _say(stack, env, "you there?", ANSWER, at_bot=True)
+    assert len(stack.gateway.sent) == 1
+
+
+async def test_general_answer_topic_and_ambient_mode_need_a_mention(env: Env) -> None:
+    await _answer_topic(env, GENERAL_THREAD)
+    stack = make_stack(env)
+    await _say(stack, env, "what should we eat", None)
+    assert stack.gateway.sent == [] and stack.ambient._debouncer.pending(GROUP_ID)
+    await _answer_topic(env)
+    await env.db.write(lambda c: set_value(c, "telegram.answer_topic_mode", "ambient"))
+    await _say(stack, env, "what should we eat", ANSWER)
+    assert stack.gateway.sent == [] and stack.llm.requests == []
 
 
 # --- /settopic ---------------------------------------------------------------------------------

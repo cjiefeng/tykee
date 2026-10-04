@@ -19,6 +19,7 @@ from aiogram.types import (
 )
 
 from app.ambient.phrases import parse_duration
+from app.ambient.rules import NON_TEXT_KINDS
 from app.ambient.service import AmbientService
 from app.brain.memory import MemoryService
 from app.db.database import Database
@@ -191,16 +192,18 @@ class TelegramAdapter:
                 await self._off_topic(chat_id, thread)
             return
 
-        addressed = not is_group or is_addressed(msg, self._me)
+        explicit = not is_group or is_addressed(msg, self._me)
+        negative = False
         if is_group and kind == "text":
             if await self._ambient.is_mute_request(text):
                 until = await self._ambient.mute(chat_id)
                 await self._send(chat_id, self._quiet_text(until), store=False, thread=thread)
                 return
-            await self._ambient.check_negative_text(chat_id, text)
-        if not addressed:
+            negative = await self._ambient.check_negative_text(chat_id, text)
+        if not explicit:
+            recorded = False
             if self._places is not None and found is not None:
-                await self._places.on_chatter(
+                recorded = await self._places.on_chatter(
                     chat_id=chat_id,
                     thread=thread,
                     row_id=row_id,
@@ -209,11 +212,25 @@ class TelegramAdapter:
                     text=text,
                     found=found,
                 )
-            await self._ambient.on_chatter(chat_id, row_id, actor, kind, text)
-            return
+            # Tykee's own topic (§10.4): every text message there is for Tykee, except stickers,
+            # emoji and media, feedback cues, a place just recorded with a 👌 (§10.5), and while
+            # muted (mentions still get through).
+            own = (
+                gate == "own"
+                and kind not in NON_TEXT_KINDS
+                and not negative
+                and not recorded
+                and not await self._ambient.is_muted(chat_id)
+            )
+            if not own:
+                await self._ambient.on_chatter(chat_id, row_id, actor, kind, text)
+                return
         if is_group:
             self._ambient.cancel(chat_id)
-        log.info("addressed", extra={"chat_id": chat_id, "user": actor.slug, "group": is_group})
+        log.info(
+            "addressed",
+            extra={"chat_id": chat_id, "user": actor.slug, "group": is_group, "explicit": explicit},
+        )
         chat = ChatContext(chat_id, is_group, thread=await self._history_thread(chat_id, is_group))
         forced = escalation.COMMANDS.get(cmd.name) if cmd is not None else None
         if forced is not None and cmd is not None and not cmd.args.strip():
@@ -228,11 +245,13 @@ class TelegramAdapter:
             reply = await self._orchestrator.respond(chat, actor, text, tier=forced)
         if self._places is not None:
             await self._places.confirm(chat_id, reply.recorded, msg.message_id)
-        if reply.text:
+        # Fallback with nothing picked ("my brain's offline") only goes to explicit asks, not
+        # to every line said in Tykee's own topic.
+        if reply.text and (explicit or reply.from_llm or reply.picks):
             await self._send(
                 chat_id,
                 reply.text,
-                reply_to=msg.message_id if is_group else None,
+                reply_to=msg.message_id if is_group and explicit else None,
                 picks=reply.picks,
                 store=reply.from_llm,
                 thread=thread,

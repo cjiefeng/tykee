@@ -633,11 +633,17 @@ async def test_topic_settings_and_label(dash: Dash, env: Env) -> None:
     await dash.login()
     r = await dash.client.post(
         "/telegram/topics",
-        data={"csrf": dash.csrf, "ignored": ["9", "11"], "off_topic_mention": "redirect"},
+        data={
+            "csrf": dash.csrf,
+            "ignored": ["9", "11"],
+            "off_topic_mention": "redirect",
+            "answer_topic_mode": "ambient",
+        },
     )
     assert r.status_code == 303
     s = await env.settings.load()
     assert s.telegram_ignored_topic_ids == [9, 11] and s.telegram_off_topic_mention == "redirect"
+    assert s.telegram_answer_topic_mode == "ambient"
     await dash.post("/telegram/topics/9/label", {"name": "Food"})
     assert await dash.stack.topics.name_of(GROUP_ID, 9) == "Food"
 

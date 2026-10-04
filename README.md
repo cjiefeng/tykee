@@ -23,7 +23,9 @@ It runs as one Python 3.12 asyncio process with SQLite, in a single Docker conta
   default. It always answers @mentions, replies and `/commands`, and steps in on its own only when
   a cheap judge call thinks it would help (e.g. "idk, you decide"). `/quiet` mutes it.
 - **Forum topics:** Tykee reads and learns from every topic (except an optional ignore list) but
-  only speaks in one answer topic, set with `/settopic` or from the dashboard. A background
+  only speaks in one answer topic, set with `/settopic` or from the dashboard. That topic is
+  Tykee's own: it replies to every message there without needing an @mention (not to stickers or
+  emoji, and not while `/quiet`; switch to mention-only on Users → Telegram). A background
   harvester turns preferences mentioned in other topics into memory suggestions.
 - **Private DMs** work too, and always get a reply.
 - **Only allowlisted Telegram users** and the one configured group are served. Everything else is

@@ -26,7 +26,9 @@ GENERAL_THREAD = 1
 KEY_ANSWER = "telegram.answer_topic_id"
 GROUP_TYPES = {"group", "supergroup"}
 
-Gate = Literal["drop", "answer", "offtopic"]
+# "own": the answer topic is a dedicated topic (not General) and `telegram.answer_topic_mode` is
+# `addressed`, so every text message there counts as addressed to Tykee.
+Gate = Literal["drop", "answer", "own", "offtopic"]
 
 
 def thread_of(msg: Message) -> int | None:
@@ -99,8 +101,11 @@ class TopicService:
         if thread_id is not None and thread_id in s.telegram_ignored_topic_ids:
             return "drop"
         answer = s.telegram_answer_topic_id
-        if answer is None or thread_id is None or thread_id == answer:
+        if answer is None or thread_id is None:
             return "answer"
+        if thread_id == answer:
+            own = s.telegram_answer_topic_mode == "addressed" and answer != GENERAL_THREAD
+            return "own" if own else "answer"
         return "offtopic"
 
     async def off_topic_mode(self) -> str:

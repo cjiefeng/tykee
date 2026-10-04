@@ -75,6 +75,7 @@ async def test_rename_merge_delete(env: Env) -> None:
 
 async def test_failed_link_is_retried_once_and_patches_history(env: Env) -> None:
     await env.db.write(lambda c: set_value(c, KEY_ANSWER, ANSWER))
+    await env.db.write(lambda c: set_value(c, "telegram.answer_topic_mode", "ambient"))
     table: dict[str, str] = {}  # Google unreachable at first: 404
     stack = make_stack(env, redirects=table)
     await say(stack, env, f"this one {SHORT} or {HOME}", SHORT, HOME)

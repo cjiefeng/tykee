@@ -143,6 +143,7 @@ async def test_where_are_we_eating_gets_name_and_link(env: Env) -> None:
 
 
 async def test_home_link_is_never_stored(env: Env) -> None:
+    await env.db.write(lambda c: set_value(c, "telegram.answer_topic_mode", "ambient"))
     stack = await setup(env)
     await say(stack, env, f"come over 👉 {HOME} eating here", HOME)
     await say(stack, env, f"pin: {HOME_Q}", HOME_Q)
@@ -231,7 +232,16 @@ async def test_other_topic_annotates_but_never_reacts(env: Env) -> None:
     assert "⟦place: Keisuke Tonkotsu King" in stored  # the harvester sees the name
 
 
+async def test_own_topic_link_without_intent_gets_a_reply(env: Env) -> None:
+    stack = await setup(env, "Looks good, want to go tonight?")
+    await say(stack, env, f"this place looks good {SHORT}", SHORT)
+    assert stack.gateway.reactions == []
+    assert [s.text for s in stack.gateway.sent] == ["Looks good, want to go tonight?"]
+    assert "Keisuke" in str(list(stack.llm.requests[0].messages))
+
+
 async def test_disabled_leaves_messages_alone(env: Env) -> None:
+    await env.db.write(lambda c: set_value(c, "telegram.answer_topic_mode", "ambient"))
     stack = await setup(env)
     await env.db.write(lambda c: set_value(c, "places.enabled", False))
     await say(stack, env, f"eating here {SHORT}", SHORT)
@@ -281,6 +291,7 @@ async def test_venue_and_location_messages(env: Env) -> None:
 
 
 async def test_record_decision_tool_reacts_instead_of_replying(env: Env) -> None:
+    await env.db.write(lambda c: set_value(c, "telegram.answer_topic_mode", "ambient"))
     stack = await setup(env)
     await say(stack, env, f"this place looks good {SHORT}", SHORT)  # place 1, no intent
     stack.gateway.reactions.clear()
