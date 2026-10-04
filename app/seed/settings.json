@@ -32,6 +32,7 @@
   "memory.pinned_max_chars": 6000,
   "telegram.ignored_topic_ids": [],
   "telegram.off_topic_mention": "ignore",
+  "telegram.answer_topic_mode": "addressed",
   "harvest.enabled": true,
   "harvest.interval_min": 30,
   "harvest.min_new_messages": 5,

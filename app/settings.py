@@ -229,6 +229,7 @@ class RuntimeSettings(BaseModel):
     telegram_answer_topic_id: int | None = None
     telegram_ignored_topic_ids: list[int] = Field(default_factory=list)
     telegram_off_topic_mention: Literal["ignore", "redirect"] = "ignore"
+    telegram_answer_topic_mode: Literal["addressed", "ambient"] = "addressed"
     harvest_enabled: bool = True
     harvest_interval_min: float = 30.0
     harvest_min_new_messages: int = 5

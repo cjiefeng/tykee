@@ -115,13 +115,18 @@ def register(router: APIRouter, deps: DashboardDeps) -> None:
         except ValueError:
             return back(request, "/users", "Topic ids must be numbers.", "error")
         mode = str(form.get("off_topic_mention", "ignore"))
+        answer_mode = str(form.get("answer_topic_mode", "addressed"))
         answer = (await deps.settings.load()).telegram_answer_topic_id
         if answer is not None and answer in ignored:
             return back(request, "/users", "The answer topic can't be ignored.", "error")
         try:
             await queries.save_settings(
                 deps.db,
-                {"telegram.ignored_topic_ids": ignored, "telegram.off_topic_mention": mode},
+                {
+                    "telegram.ignored_topic_ids": ignored,
+                    "telegram.off_topic_mention": mode,
+                    "telegram.answer_topic_mode": answer_mode,
+                },
             )
         except queries.SettingsError as e:
             return back(request, "/users", str(e), "error")
