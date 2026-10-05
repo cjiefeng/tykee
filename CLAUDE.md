@@ -79,7 +79,10 @@ All tooling runs inside Docker (no local Python/uv needed).
   `place_links`), `service.py` (`PlaceService`: annotate before storing, upsert/dedupe, place
   notes whose `## Details` bullets it owns, visits, rename/merge/delete, hourly retry, import
   adoption), `intent.py` + `decide.py` (`SharedPlaces`: code-only "eating here" in the answer
-  topic, reactions for Claude's `record_decision`).
+  topic, reactions for Claude's `record_decision`). Plain-name matching (v1.41):
+  `links.match_name` (exact → fuzzy → prefix) via `PlaceService.match_name`, used by
+  `record_decision`/`add_option` without `place_id`, the harvester and `find_places(near_place)`;
+  `backfill_names()` runs once at startup.
 - `app/places/` recommendations (§10.6, M9): `areas.py` (gazetteer seeded from `app/seed/areas.json`,
   built by `scripts/build_areas.py` from data.gov.sg; alias → fuzzy matching; user areas copy a
   known area's centre, never coordinates), `attributes.py` (pet_friendly & co. with provenance:

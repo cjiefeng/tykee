@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import math
 import re
-from collections.abc import Sequence
+from collections.abc import Collection, Sequence
 from dataclasses import dataclass
 from urllib.parse import parse_qs, unquote_plus, urlsplit
 
@@ -324,6 +324,44 @@ def match_place(choice: str, marked: Sequence[Annotated]) -> int | None:
         if a.place_id is not None and (have == want or fuzz.ratio(have, want) >= 90):
             return a.place_id
     return None
+
+
+MIN_PREFIX = 5  # "keisuke" → "Keisuke Tonkotsu King", but never "din" → "Din Tai Fung"
+
+
+@dataclass(frozen=True)
+class NameMatch:
+    """A plain name looked up among known places (§10.5 plain-name matching, v1.41)."""
+
+    place_id: int | None = None
+    ambiguous: tuple[int, ...] = ()
+
+
+def match_name(
+    name: str, places: Sequence[tuple[int, str]], linked: Collection[int] = ()
+) -> NameMatch:
+    """Tiers exact → fuzzy (ratio ≥ 90) → token prefix; the first tier with a hit decides.
+    Several hits are narrowed to ``linked`` (the category's places); one left is a match."""
+    from rapidfuzz import fuzz
+
+    want = normalise(name)
+    if not want:
+        return NameMatch()
+    words = want.split()
+    named = [(pid, normalise(n)) for pid, n in places]
+    prefix = len(want) >= MIN_PREFIX
+    tiers = (
+        [pid for pid, have in named if have == want],
+        [pid for pid, have in named if fuzz.ratio(have, want) >= 90],
+        [pid for pid, have in named if prefix and have.split()[: len(words)] == words],
+    )
+    for hits in tiers:
+        if not hits:
+            continue
+        if len(hits) > 1:
+            hits = [pid for pid in hits if pid in linked] or hits
+        return NameMatch(hits[0]) if len(hits) == 1 else NameMatch(ambiguous=tuple(hits))
+    return NameMatch()
 
 
 def strip_markup(text: str) -> str:

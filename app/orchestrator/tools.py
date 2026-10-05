@@ -88,6 +88,7 @@ class FindPlacesIn(BaseModel):
     area: str | None = Field(None, max_length=100)
     near_maps_url: str | None = Field(None, max_length=2000)
     anchor_place_id: int | None = None
+    near_place: str | None = Field(None, max_length=120)
     must: list[str] = Field(default_factory=list, max_length=5)
     n: int | None = Field(default=None, ge=1, le=5)
     for_users: str | None = None
@@ -312,7 +313,10 @@ def tool_definitions(user_slugs: Sequence[str]) -> list[ToolParam]:
                     "for_users": for_users,
                     "place_id": {
                         "type": "integer",
-                        "description": "The place_id from a ⟦place: … · place_id=N⟧ marker.",
+                        "description": (
+                            "The place_id from a ⟦place: … · place_id=N⟧ marker. Without one, "
+                            "a shop named in words is matched to a known place by name."
+                        ),
                     },
                 },
                 "required": ["category", "choice"],
@@ -340,8 +344,9 @@ def place_tool_definitions(user_slugs: Sequence[str]) -> list[ToolParam]:
                 "code; never pick yourself). "
                 "Call resolve_category first (brunch, dinner, cafe…). Give exactly one of area "
                 "(a neighbourhood, town or MRT station in their words, e.g. 'Tiong Bahru', "
-                "'near home'), near_maps_url (a Maps link they pasted) or anchor_place_id (a "
-                "place_id marker: 'near X'). must lists required attributes, e.g. "
+                "'near home'), near_maps_url (a Maps link they pasted), anchor_place_id (a "
+                "place_id marker: 'near X') or near_place (a known place named in words: "
+                "'near Keisuke'). must lists required attributes, e.g. "
                 "['pet_friendly'] when they ask for pet friendly or mention a pet by name. "
                 "Present the picks in the order and numbering returned; buttons are attached "
                 "automatically. If it says suggest_web, follow its note."
@@ -353,6 +358,7 @@ def place_tool_definitions(user_slugs: Sequence[str]) -> list[ToolParam]:
                     "area": {"type": "string"},
                     "near_maps_url": {"type": "string"},
                     "anchor_place_id": {"type": "integer"},
+                    "near_place": {"type": "string"},
                     "must": {"type": "array", "items": {"type": "string", "enum": keys}},
                     "n": {"type": "integer", "minimum": 1, "maximum": 5},
                     "for_users": {
@@ -720,6 +726,19 @@ class ToolRouter:
             }
         )
 
+    async def _ambiguous(
+        self, svc: PlaceService, name: str, ids: Sequence[int], tool: str
+    ) -> ToolOutcome:
+        """Several known places fit a plain name (v1.41): nothing is done; Claude asks."""
+        places = [p for i in ids if (p := await svc.get(i)) is not None]
+        listed = "; ".join(
+            f"place_id {p.id}: {p.name}" + (f" ({p.address})" if p.address else "") for p in places
+        )
+        return _err(
+            f"several known places match {name!r}: {listed}. Ask which one they mean, then call "
+            f"{tool} again with its place_id."
+        )
+
     async def _add(self, raw: dict[str, Any], ctx: TurnContext) -> ToolOutcome:
         a = AddOptionIn.model_validate(raw)
         cat = await self._category(a.category)
@@ -733,6 +752,8 @@ class ToolRouter:
             if place is None:
                 return _err(f"unknown place_id {a.place_id}")
             place_id = place.id
+        elif self._p is not None:
+            place_id = (await self._p.match_name(a.name, cat.id)).place_id
         added = await self._d.add_option(cat, a.name, a.tags, a.owner, place_id)
         return _ok({"added": added, "note": "" if added else "already exists"})
 
@@ -750,6 +771,12 @@ class ToolRouter:
             if place is None:
                 return _err(f"unknown place_id {a.place_id}")
             choice, place_id = place.name, place.id
+        elif self._p is not None:
+            found = await self._p.match_name(choice, cat.id)
+            if found.ambiguous:
+                return await self._ambiguous(self._p, choice, found.ambiguous, "record_decision")
+            if found.place_id is not None and (place := await self._p.get(found.place_id)):
+                choice, place_id = place.name, place.id
         r = await self._d.record_user(
             cat,
             choice=choice,
@@ -799,8 +826,18 @@ class ToolRouter:
         for_users = a.for_users or ctx.default_for_users
         if for_users != "both" and for_users not in self._d.user_slugs:
             return _err(f"for_users must be one of {[*self._d.user_slugs, 'both']}")
+        anchor = a.anchor_place_id
+        if anchor is None and a.near_place and a.near_place.strip():
+            found = await self._r.places.match_name(a.near_place, cat.id)
+            if found.ambiguous:
+                return await self._ambiguous(
+                    self._r.places, a.near_place, found.ambiguous, "find_places"
+                )
+            if found.place_id is None:
+                return _err(f"unknown place {a.near_place!r}; ask which area they mean")
+            anchor = found.place_id
         centre = await self._r.locate(
-            area=a.area, near_maps_url=a.near_maps_url, anchor_place_id=a.anchor_place_id
+            area=a.area, near_maps_url=a.near_maps_url, anchor_place_id=anchor
         )
         result = await self._r.find(
             cat,
@@ -811,7 +848,7 @@ class ToolRouter:
             asked_by=ctx.actor.id,
             chat_id=ctx.chat_id,
             web=ctx.web_on,
-            anchor_place_id=a.anchor_place_id,
+            anchor_place_id=anchor,
         )
         ctx.recommend = TurnState(result, cat)
         ctx.last_picks = [(x.decision_id, x.item.place.name) for x in result.picks]

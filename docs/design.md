@@ -1047,7 +1047,8 @@ Names come from Claude or the extraction model, never from scanning raw chat tex
 |---|---|---|
 | `record_decision` (no `place_id`) | text-only decision | match → `place_id`, the place's name as `choice`, visit counted. `ambiguous` → nothing recorded; the tool result lists the candidates (`place_id`, name, area) so Claude asks which one, or calls again with a `place_id` |
 | Harvester observed decisions (all topics + reader chats) | text-only decision | marker match (`match_place`) first, then `match_name`; `ambiguous`/`none` → text-only, as now |
-| Harvester option suggestions, `add_option` (no `place_id`) | option without a place | match → the option gets `place_id`; `ambiguous` → no link |
+| Harvester option suggestions, `add_option` (no `place_id`) | option without a place | match → the option gets `place_id`; `ambiguous` → no link. The harvester doesn't suggest an option whose place is already an option of the category ("Keisuke" after a decision for "Keisuke Tonkotsu King") |
+| Harvester place attributes (§10.6) | exact name, unique | `match_name` without a category |
 | `find_places` | anchor only via `anchor_place_id` (a marker) | new `near_place` (a name): `match_name` → anchor; `ambiguous` → error listing candidates; `none` → "unknown place; ask for an area" |
 | Code-only answer-topic path (§10.5 item 3) | needs a link | **unchanged**: no LLM there to pick the name out of the message |
 
@@ -1055,7 +1056,9 @@ Names come from Claude or the extraction model, never from scanning raw chat tex
 
 **Not changed:** the privacy rule (only named businesses are places, so there is nothing to match a home against), the import's apply-time adoption (§15), and dedupe of new places (still `google_id` → name + 75 m).
 
-**Tests:** each tier; prefix minimum length; chain ambiguity narrowed by category; `record_decision` ambiguous result records nothing; harvester DM episode "keisuke tonight" → `place_id` + visit; `near_place`; backfill exact-only and idempotent.
+**As built:** `links.match_name` (pure tiers) + `PlaceService.match_name` (option lookup, category links) and `PlaceService.backfill_names()` (called at startup in `main.py`). Ambiguous tool errors list `place_id N: Name (address)` per candidate.
+
+**Tests** (`tests/unit/test_place_names.py`): each tier; prefix minimum length; chain ambiguity narrowed by category; `record_decision` ambiguous result records nothing; harvester DM episode "keisuke tonight" → `place_id` + visit; `near_place`; backfill exact-only and idempotent.
 
 #### Privacy rule (safe topics, §15.4)
 

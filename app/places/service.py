@@ -30,7 +30,7 @@ from app.places.areas import Area
 from app.places.attributes import Attribute, Source
 from app.places.links import LOCATION_SHARED, ParsedPlace
 from app.places.resolver import PlaceResolver, Resolution
-from app.settings import SettingsStore
+from app.settings import SettingsStore, get_value, set_value
 from app.timeutil import from_sql, to_sql, utcnow
 
 log = logging.getLogger(__name__)
@@ -39,6 +39,7 @@ SAME_PLACE_M = 75.0
 RETRY_AFTER = timedelta(hours=6)
 MAX_ATTEMPTS = 2  # the first try plus one retry (§10.5 failure handling)
 DETAILS = "Details"
+NAME_BACKFILL_DONE = "places.name_backfill_done"  # v1.41 one-off, see backfill_names()
 
 
 @dataclass(frozen=True)
@@ -366,12 +367,83 @@ class PlaceService:
         )
         return [_place(r) for r in rows]
 
-    async def by_name(self, name: str) -> list[Place]:
-        norm = normalise(name)
-        rows = await self._db.read(
-            lambda c: c.execute("SELECT * FROM places WHERE name_norm = ?", (norm,)).fetchall()
-        )
-        return [_place(r) for r in rows]
+    async def match_name(self, name: str, category_id: int | None = None) -> links.NameMatch:
+        """A place named in plain words (§10.5 plain-name matching, v1.41): the category's
+        option with that name and a place, else exact → fuzzy → prefix among all places."""
+
+        def _q(c: sqlite3.Connection) -> links.NameMatch:
+            linked: set[int] = set()
+            if category_id is not None:
+                row = c.execute(
+                    "SELECT place_id FROM options WHERE category_id = ? AND lower(name) = lower(?) "
+                    "AND place_id IS NOT NULL",
+                    (category_id, name.strip()),
+                ).fetchone()
+                if row is not None:
+                    return links.NameMatch(int(row[0]))
+                linked = {
+                    int(r[0])
+                    for r in c.execute(
+                        "SELECT place_id FROM options WHERE category_id = :cat "
+                        "AND place_id IS NOT NULL UNION SELECT id FROM places "
+                        "WHERE category_hint = :cat UNION SELECT place_id FROM decisions "
+                        "WHERE category_id = :cat AND status = 'accepted' AND place_id IS NOT NULL",
+                        {"cat": category_id},
+                    )
+                }
+            places = [(int(r[0]), str(r[1])) for r in c.execute("SELECT id, name FROM places")]
+            return links.match_name(name, places, linked)
+
+        return await self._db.read(_q)
+
+    async def backfill_names(self) -> tuple[int, int]:
+        """One-off (v1.41): link past options and accepted decisions without a place to a place
+        with exactly their normalised name, if only one has it. Accepted decisions count as
+        visits. Returns (options, decisions) linked; runs once per install."""
+
+        def _go(c: sqlite3.Connection) -> tuple[int, int, set[int]]:
+            if get_value(c, NAME_BACKFILL_DONE):
+                return 0, 0, set()
+            by_norm: dict[str, list[int]] = {}
+            for r in c.execute("SELECT id, name_norm FROM places"):
+                by_norm.setdefault(r[1], []).append(int(r[0]))
+
+            def one(name: str) -> int | None:
+                ids = by_norm.get(normalise(name), [])
+                return ids[0] if len(ids) == 1 else None
+
+            opts = [
+                (pid, int(r[0]))
+                for r in c.execute("SELECT id, name FROM options WHERE place_id IS NULL")
+                if (pid := one(r[1])) is not None
+            ]
+            decs = [
+                (pid, int(r[0]))
+                for r in c.execute(
+                    "SELECT id, choice_text FROM decisions WHERE place_id IS NULL "
+                    "AND status = 'accepted'"
+                )
+                if (pid := one(r[1])) is not None
+            ]
+            c.executemany("UPDATE options SET place_id = ? WHERE id = ?", opts)
+            c.executemany("UPDATE decisions SET place_id = ? WHERE id = ?", decs)
+            for pid, _ in decs:
+                c.execute(
+                    "UPDATE places SET visit_count = visit_count + 1, status = 'visited' "
+                    "WHERE id = ?",
+                    (pid,),
+                )
+            set_value(c, NAME_BACKFILL_DONE, True)
+            return len(opts), len(decs), {pid for pid, _ in decs}
+
+        n_opts, n_decs, visited = await self._db.write(_go)
+        for pid in sorted(visited):
+            place = await self.get(pid)
+            if place is not None:
+                await self._sync_note(place)
+        if n_opts or n_decs:
+            log.info("places linked by name", extra={"options": n_opts, "decisions": n_decs})
+        return n_opts, n_decs
 
     async def recent_links(self, limit: int = 30) -> list[LinkRow]:
         rows = await self._db.read(
