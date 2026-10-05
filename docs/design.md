@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **Status** | Draft v1.40 (Tykee's own topic: with `telegram.answer_topic_mode = addressed`, the default, every text message in a dedicated answer topic is answered without a mention, §10.4). Earlier: v1.39 (§16 marks M1–M10 as built; §10.6 lists the other must-have attributes as built, not future). Earlier: v1.38 (replies that need the web run on Sonnet-tier: `web.tier` and the `look_up_web` handoff, §7.1, §7.5). Earlier: v1.37 (web search location without `country`: SG is rejected by the API; quieter logs, §7.5, §14). Earlier: v1.36 (Overview **Web searches today** tile: searches vs. `web.daily_search_cap` and the web gate's state, §7.5, §11); v1.35 (a 400 on web tools pauses them for an hour and shows the API's reason on the dashboard, §7.5); v1.34 (reply escalation built: `/think` and phrases → Sonnet-tier, `/thinkharder` and "think even harder" → Opus-tier, §7.1); v1.33 (M10 as built: read-only account reader with resolve/log-out on the wrapper, first poll sets a starting point, immediate harvest after a poll, Backfill as a generated export into the import wizard, §10.7); v1.32 (share.google links resolve to places; `not_place` link status, §10.5) |
+| **Status** | Draft v1.41 (plain-name matching: a shop named in words, without a link, is linked to the known place for decisions, options and "near X", §10.5, §10.6). Earlier: v1.40 (Tykee's own topic: with `telegram.answer_topic_mode = addressed`, the default, every text message in a dedicated answer topic is answered without a mention, §10.4). Earlier: v1.39 (§16 marks M1–M10 as built; §10.6 lists the other must-have attributes as built, not future). Earlier: v1.38 (replies that need the web run on Sonnet-tier: `web.tier` and the `look_up_web` handoff, §7.1, §7.5). Earlier: v1.37 (web search location without `country`: SG is rejected by the API; quieter logs, §7.5, §14). Earlier: v1.36 (Overview **Web searches today** tile: searches vs. `web.daily_search_cap` and the web gate's state, §7.5, §11); v1.35 (a 400 on web tools pauses them for an hour and shows the API's reason on the dashboard, §7.5); v1.34 (reply escalation built: `/think` and phrases → Sonnet-tier, `/thinkharder` and "think even harder" → Opus-tier, §7.1); v1.33 (M10 as built: read-only account reader with resolve/log-out on the wrapper, first poll sets a starting point, immediate harvest after a poll, Backfill as a generated export into the import wizard, §10.7); v1.32 (share.google links resolve to places; `not_place` link status, §10.5) |
 | **Name** | Tykee: phonetic spelling of Tyche, the Greek goddess of chance. Telegram handle e.g. `@TykeeBot` (must end in "bot") |
 | **Author** | Jack |
 | **Date** | 2026-10-01 |
@@ -577,7 +577,7 @@ Prompt caching on [1]–[3] keeps per-message cost low because they're identical
 | `read_note` | Full note content | `path` |
 | `write_note` | Create / append / replace section (explicit memories) | `path`, `mode`, `content`, `heading?` |
 | `propose_memory` | Queue an implicit memory for approval | `owner`, `content`, `reason` |
-| `find_places` *(M9)* | Recommend places near an area, filtered by must-haves (e.g. pet-friendly); code-ranked from known places, signals when web discovery is needed (§10.6) | `area?`, `near_maps_url?`, `anchor_place_id?`, `category`, `must[]`, `prefer[]`, `radius_m`, `n` |
+| `find_places` *(M9)* | Recommend places near an area, filtered by must-haves (e.g. pet-friendly); code-ranked from known places, signals when web discovery is needed (§10.6) | `area?`, `near_maps_url?`, `anchor_place_id?`, `near_place?` (v1.41), `category`, `must[]`, `prefer[]`, `radius_m`, `n` |
 | `save_place_candidates` *(M9)* | Store places found via web search as `unvisited`, with attributes + evidence | `[{name, area, address?, attributes{}, evidence_url}]` |
 | `set_place_attribute` *(M9)* | Record an attribute a user stated ("dogs OK at X") | `place_id`, `key`, `value`, `evidence` |
 | `record_decision` *(M8)* | Record a choice the users made themselves (e.g. a pasted Maps link + "eating here"), so recency and history stay correct | `category`, `choice`, `for_users`, `place_id?` |
@@ -1020,11 +1020,45 @@ URLs are taken from message entities (`url`, `text_link`), not just regex on the
 2. **Upsert the place** in `places` (dedupe by `google_id` (ftid/cid, kgmid, venue place id) if present, else same normalised name within 75 m, or any distance when either side has no coordinates; two different ids of the same scheme are never merged) and in the vault as `shared/places/<slug>.md` (`type: place`): name, Maps link, coordinates, first/last mentioned, times visited, plus anything learned later ("partner loves the black garlic broth").
 3. **Record the decision** when the message implies you're going there ("eating here", "let's go this one"):
    - **In the answer topic, Tykee not mentioned (decided v1.27: code only, no LLM call):** the message (stripped of links and markers) contains one of `places.intent_phrases`, or one was said in that topic within `places.intent_window_s` (120 s) before the link, or is said within that window after it. The category is the one the messages name (alias/slug match, as in the §8.5 fallback: "dinner here", "lunch here tmr?"), else the household-time **meal slot** in `places.meal_slots` (default 05:00–10:30 breakfast, 10:30–15:00 lunch, 17:00–23:00 dinner; wraps midnight). If that category doesn't exist, nothing is recorded (the place is still kept). Otherwise the decision is stored `status='accepted'`, `source='user'`, `for_users='both'`, `asked_by` = whoever said it, and mirrored to the decision log. Tykee confirms with a **reaction** on the link message instead of a reply, keeping §10.2's "silent by default". The reaction is `places.reaction`, default 👌: 📍 isn't in Telegram's list of emoji bots may react with (the setting only accepts that list). The burst still goes through the ambient judge as usual; "Decisions today" tells it the choice is made. In Tykee's own topic (§10.4, v1.40) this code path runs first; a link message it doesn't record (no intent) is then answered by Claude like any other message there.
-   - **When Tykee is addressed (mention, reply, DM):** Claude calls `record_decision(category, choice, for_users, place_id)` after `resolve_category`. With a `place_id` the choice is the place's name. Tykee reacts on the message that shared the place (else the message it answered) and replies with a few words at most; an empty reply sends nothing.
+   - **When Tykee is addressed (mention, reply, DM):** Claude calls `record_decision(category, choice, for_users, place_id)` after `resolve_category`. With a `place_id` the choice is the place's name. Without one, the choice is matched to a known place by name (*Plain-name matching* below, v1.41). Tykee reacts on the message that shared the place (else the message it answered) and replies with a few words at most; an empty reply sends nothing.
    - Either way, the place becomes an option in that category (`tags: ["place"]`, `place_id`; an existing option with the same name is linked instead), and the same choice in the same chat and category isn't recorded twice within `decisions.session_hours`. The place's `visit_count` goes up.
    - **In other topics:** the harvester (§10.4) sees the annotation and records an observed decision the same way (existing categories only). An extracted choice or option matching a marker's name (normalised, or rapidfuzz ≥ 90) gets that `place_id` and the place's canonical name.
    - A link shared without intent ("this place looks nice") only creates/updates the place, plus an option suggestion in the inbox for the category the message or meal slot gives (once; not if it's already an option), no decision.
 4. **Answering "where are we eating?"** works from today's `decisions` (with `place_id` → name + Maps link), listed under "Decisions today" in the orchestrator's dynamic context ([4] in §7.2). Asking "what was that place we went to in Tanjong Pagar?" works through `search_memory` over place notes.
+
+#### Plain-name matching (v1.41)
+
+**Problem.** A place is linked to a decision or option only through a marker: the link has to be in the same message, or (harvester) the same burst. Once a link has been shared, the shop is usually named in plain words later ("dinner at Keisuke tonight?" "ok"), especially in the Jack ↔ partner DM (§10.7). Those decisions are recorded as text without a `place_id`, so "where are we eating?" has no Maps link, `visit_count` doesn't move, the recommender (§10.6) doesn't see the visit, and "near Keisuke" can't use the place as an anchor.
+
+**Rule.** One lookup, `PlaceService.match_name(name, category=None) -> NameMatch` (`place` | `ambiguous[places]` | `none`), pure matching in `links.py`, no LLM, no network:
+
+1. **Option first:** if `category` is given and it has an option with that exact name (case-insensitive) and a `place_id`, that place.
+2. Against all places, tiers in order; the first tier with any hit decides:
+   - **exact:** same normalised name (`decisions.text.normalise`);
+   - **fuzzy:** rapidfuzz `ratio` ≥ 90 on normalised names (as in import consolidation and `match_place`);
+   - **prefix:** the name's tokens are the leading tokens of the place's name and at least 5 characters long ("keisuke" → "Keisuke Tonkotsu King"; "din" never matches "Din Tai Fung").
+3. Several hits in the deciding tier: keep those linked to `category` (option `place_id`, an accepted decision, or `category_hint`, as in the §10.6 candidate pool). Exactly one left → match; otherwise `ambiguous` (chains with several outlets, two "Kopitiam"s).
+
+Names come from Claude or the extraction model, never from scanning raw chat text, so a word in passing ("the keisuke style broth") never becomes a visit.
+
+**Where it's used:**
+
+| Caller | Without a marker today | With v1.41 |
+|---|---|---|
+| `record_decision` (no `place_id`) | text-only decision | match → `place_id`, the place's name as `choice`, visit counted. `ambiguous` → nothing recorded; the tool result lists the candidates (`place_id`, name, area) so Claude asks which one, or calls again with a `place_id` |
+| Harvester observed decisions (all topics + reader chats) | text-only decision | marker match (`match_place`) first, then `match_name`; `ambiguous`/`none` → text-only, as now |
+| Harvester option suggestions, `add_option` (no `place_id`) | option without a place | match → the option gets `place_id`; `ambiguous` → no link. The harvester doesn't suggest an option whose place is already an option of the category ("Keisuke" after a decision for "Keisuke Tonkotsu King") |
+| Harvester place attributes (§10.6) | exact name, unique | `match_name` without a category |
+| `find_places` | anchor only via `anchor_place_id` (a marker) | new `near_place` (a name): `match_name` → anchor; `ambiguous` → error listing candidates; `none` → "unknown place; ask for an area" |
+| Code-only answer-topic path (§10.5 item 3) | needs a link | **unchanged**: no LLM there to pick the name out of the message |
+
+**Existing data:** a one-off backfill at startup links past decisions and options that have no `place_id` to a place, **exact tier only** and only when unique (fuzzy/prefix guesses aren't applied retroactively). Decisions linked this way count as visits. It runs once (settings key `places.name_backfill_done`) and logs how many rows it linked.
+
+**Not changed:** the privacy rule (only named businesses are places, so there is nothing to match a home against), the import's apply-time adoption (§15), and dedupe of new places (still `google_id` → name + 75 m).
+
+**As built:** `links.match_name` (pure tiers) + `PlaceService.match_name` (option lookup, category links) and `PlaceService.backfill_names()` (called at startup in `main.py`). Ambiguous tool errors list `place_id N: Name (address)` per candidate.
+
+**Tests** (`tests/unit/test_place_names.py`): each tier; prefix minimum length; chain ambiguity narrowed by category; `record_decision` ambiguous result records nothing; harvester DM episode "keisuke tonight" → `place_id` + visit; `near_place`; backfill exact-only and idempotent.
 
 #### Privacy rule (safe topics, §15.4)
 
@@ -1079,7 +1113,7 @@ Resolver errors (timeout, Google consent/interstitial page, blocked host, unpars
 - **Dedupe:** same `google_id`, else same normalised name and (when both have coordinates) within 75 m. Two ids of the same scheme that differ are different places; a venue's `gpid:` and a link's `cid:` can still match by name and distance.
 - **Place notes:** `shared/places/<slug>.md` (`-<id>` suffix on a slug clash; an existing note at that path, e.g. one Claude wrote, is reused). Code owns only the generated bullets of a `## Details` section (Maps link, address, coordinates, first/last mentioned, visits) and rewrites them on creation, a mention on a new day, a visit, rename or merge. Every other line is kept, including lines appended without a heading that land inside Details. Merging appends the other note's own content under "From <name>" and deletes it.
 - **Settings** (Memory → Places, also in raw Settings): `places.enabled` (true), `places.reaction` (👌, Telegram's bot reaction list only), `places.intent_phrases`, `places.intent_window_s` (120), `places.meal_slots`.
-- **Persona rules** explain markers, `record_decision` and answering from "Decisions today"; Claude never writes markers itself. `add_option` takes an optional `place_id`.
+- **Persona rules** explain markers, `record_decision` and answering from "Decisions today"; Claude never writes markers itself. `add_option` takes an optional `place_id`; without one, the name is matched to a known place (v1.41).
 - **Telegram:** `ChatGateway.set_reaction` (`setMessageReaction`); failures are logged, never raised.
 
 ### 10.6 Place recommendations, incl. pet-friendly (M9)
@@ -1105,7 +1139,8 @@ Ask Tykee for recommendations around a place, optionally with must-haves:
   ▼
 1. LOCATE (code)        areas gazetteer → centre + radius
                         or near_maps_url → M8 resolver gives coordinates
-                        or anchor_place_id ("near Merci Marcel")
+                        or anchor_place_id (a marker) / near_place ("near Merci Marcel",
+                        matched by name, v1.41)
   ▼
 2. KNOWN (code, free)   places within radius (haversine) or with matching area text
                         → must-have filter → score → weighted random pick

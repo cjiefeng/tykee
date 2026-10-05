@@ -562,8 +562,12 @@ class Harvester:
                 for_users = "both"  # §10.7: what the two of them settle in their DM
             choice = ep.choice.strip()
             place = None
-            if (pid := place_links.match_place(choice, marked)) is not None and self._places:
-                place = await self._places.get(pid)
+            if self._places is not None:
+                # A marker in this burst first, else a known place named in words (v1.41).
+                pid = place_links.match_place(choice, marked)
+                if pid is None:
+                    pid = (await self._places.match_name(choice, category.id)).place_id
+                place = await self._places.get(pid) if pid is not None else None
             at = _parse_ts(ep.ts, fallback_ts, self._tz)
             await self._decisions.record_observed(
                 category,
@@ -596,7 +600,12 @@ class Harvester:
                 "name": opt.name.strip(),
                 "tags": opt.tags,
             }
-            if (pid := place_links.match_place(opt.name, marked)) is not None:
+            pid = place_links.match_place(opt.name, marked)
+            if pid is None and self._places is not None:
+                pid = (await self._places.match_name(opt.name, category.id)).place_id
+            if pid is not None:
+                if await self._is_option(category.id, pid):
+                    continue  # the place is already an option under its own name
                 payload["place_id"] = pid
             await self._memory.suggest(
                 kind="option",
@@ -610,6 +619,15 @@ class Harvester:
         for pa in ex.place_attributes:
             if await self._suggest_attribute(pa, topic, source, marked):
                 result.suggestions += 1
+
+    async def _is_option(self, category_id: int, place_id: int) -> bool:
+        row = await self._db.read(
+            lambda c: c.execute(
+                "SELECT 1 FROM options WHERE category_id = ? AND place_id = ?",
+                (category_id, place_id),
+            ).fetchone()
+        )
+        return row is not None
 
     async def _suggest_attribute(
         self,
@@ -629,9 +647,8 @@ class Harvester:
         place = None
         if (pid := place_links.match_place(pa.place, marked)) is not None:
             place = await self._places.get(pid)
-        if place is None:
-            same = await self._places.by_name(pa.place)
-            place = same[0] if len(same) == 1 else None
+        if place is None and (pid := (await self._places.match_name(pa.place)).place_id):
+            place = await self._places.get(pid)
         if place is None:
             return False
         have = (await self._places.attributes([place.id])).get(place.id, {}).get(key)

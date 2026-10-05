@@ -158,6 +158,7 @@ async def run(env: Env) -> None:
         places = PlaceService(
             db=db, settings=settings, resolver=PlaceResolver(db), tz=tz, store=store
         )
+        await places.backfill_names()  # v1.41 one-off: past decisions named a known place
         shared_places = SharedPlaces(
             db=db,
             settings=settings,

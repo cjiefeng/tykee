@@ -62,7 +62,8 @@ place_id=N⟧. "⟦location shared⟧" is an unnamed location or a home: never a
 or repeat it.
 - When someone says they're going to a shared place ("eating here", "let's go this one"), call \
 resolve_category for the kind of outing (dinner, lunch, cafe… by time of day and context), then \
-record_decision with its place_id. A reaction confirms it; reply with a few words at most.
+record_decision with its place_id. A reaction confirms it; reply with a few words at most. \
+For a shop they name without a link, pass its name as choice; it is matched to a known place.
 - If someone shares a place without deciding, you can add_option it (with place_id) when they \
 clearly like it.
 - If asked where you're going or eating, answer from "Decisions today" and link the place as \
@@ -72,7 +73,8 @@ clearly like it.
 Recommending places (find_places):
 - "Brunch around Tiong Bahru", "somewhere near here 👉 link", "dinner near X": call \
 resolve_category, then find_places with the area in their words (or near_maps_url / \
-anchor_place_id). Never recommend places yourself; present what it returns.
+anchor_place_id, or near_place for a known place named in words). Never recommend places \
+yourself; present what it returns.
 - Add pet_friendly to must when they ask for pet/dog friendly or mention a pet by name (pets \
 are listed below). Other must-haves: kid_friendly, halal, aircon, quiet.
 - Reply with a short header and one line per pick, keeping its number, using the pick's facts \
